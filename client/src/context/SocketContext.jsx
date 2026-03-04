@@ -8,7 +8,11 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 import { io } from 'socket.io-client';
 import { useAuth } from '../hooks/useAuth';
 
-const SOCKET_SERVER_URL = import.meta.env.VITE_APP_API_URL || 'http://localhost:5000';
+// for development use this
+// const SOCKET_SERVER_URL = import.meta.env.VITE_APP_API_URL || 'http://localhost:5000';
+
+// for production use this
+const SOCKET_SERVER_URL = import.meta.env.VITE_API_URL || 'https://skillsyncfyp.onrender.com';
 
 export const SocketContext = createContext();
 

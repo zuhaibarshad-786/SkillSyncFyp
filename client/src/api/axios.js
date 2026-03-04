@@ -28,7 +28,7 @@
 
 
 
-// client/src/api/axios.js
+client/src/api/axios.js
 import axios from "axios";
 
 // Use Vercel environment variable
