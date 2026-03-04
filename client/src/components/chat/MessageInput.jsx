@@ -1,23 +1,22 @@
 // client/src/components/chat/MessageInput.jsx
 import React, { useState } from 'react';
 import { FaPaperPlane } from 'react-icons/fa';
-import Button from '../common/Button'; 
+import Button from '../common/Button';
 
 /**
- * Input field for composing and sending chat messages.
- * @param {string} chatId - The ID of the current conversation room.
- * @param {string} senderId - The ID of the current authenticated user.
- * @param {string} receiverId - The ID of the recipient.
- * @param {object} socket - The Socket.io client instance.
+ * @param {string} chatId        - Current conversation room ID
+ * @param {string} senderId      - Current authenticated user's ID
+ * @param {string} receiverId    - Recipient's user ID
+ * @param {object} socket        - Socket.io client instance
+ * @param {boolean} disabled     - Disable when chat is not active or disconnected
  */
-const MessageInput = ({ chatId, senderId, receiverId, socket }) => {
+const MessageInput = ({ chatId, senderId, receiverId, socket, disabled }) => {
     const [message, setMessage] = useState('');
 
     const handleSend = (e) => {
         e.preventDefault();
-        if (!message.trim() || !socket || !chatId) return;
+        if (!message.trim() || !socket || !chatId || disabled) return;
 
-        // Emit the message to the server via Socket.io
         socket.emit('sendMessage', {
             chatId,
             senderId,
@@ -25,24 +24,27 @@ const MessageInput = ({ chatId, senderId, receiverId, socket }) => {
             content: message.trim(),
         });
 
-        setMessage(''); // Clear the input field
+        setMessage('');
     };
 
     return (
-        <form onSubmit={handleSend} className="p-4 bg-gray-50 border-t flex items-center space-x-3">
+        <form
+            onSubmit={handleSend}
+            className="p-3 bg-white border-t flex items-center gap-2"
+        >
             <input
                 type="text"
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
-                placeholder="Type your message..."
-                className="flex-grow p-3 border border-gray-300 rounded-xl focus:ring-indigo-500 focus:border-indigo-500 transition duration-150"
-                disabled={!socket || !chatId}
+                placeholder={disabled ? 'Chat must be active to send messages...' : 'Type your message...'}
+                className="flex-grow p-3 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 transition disabled:bg-gray-100 disabled:cursor-not-allowed"
+                disabled={disabled}
             />
             <Button
                 type="submit"
                 variant="primary"
-                className="w-12 h-12 rounded-full p-0 flex items-center justify-center"
-                disabled={!socket || !chatId || !message.trim()}
+                className="w-11 h-11 rounded-full p-0 flex items-center justify-center shrink-0"
+                disabled={disabled || !message.trim()}
             >
                 <FaPaperPlane className="w-4 h-4" />
             </Button>

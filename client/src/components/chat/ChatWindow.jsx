@@ -1,63 +1,74 @@
-// client/src/components/chat/ChatWindow.jsx (FIXED - No Infinite Retry Loop)
+// client/src/components/chat/ChatWindow.jsx
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSocket } from '../../hooks/useSocket.jsx'; 
+import { useSocket } from '../../hooks/useSocket.jsx';
 import { useAuth } from '../../hooks/useAuth.jsx';
 import api from '../../api/axios';
-import { FaVideo, FaCalendarAlt, FaEllipsisV, FaTrashAlt, FaCheckCircle, FaSpinner, FaExclamationTriangle } from 'react-icons/fa';
+import {
+    FaVideo, FaCalendarAlt, FaEllipsisV, FaTrashAlt,
+    FaCheckCircle, FaSpinner, FaExclamationTriangle, FaClock, FaComments
+} from 'react-icons/fa';
 import MessageInput from './MessageInput';
-import Button from '../common/Button'; 
+import Button from '../common/Button';
 import SessionSchedulerModal from './SessionSchedulerModal';
 
 
-// Helper component for message display
-const MessageBubble = ({ message, isCurrentUser, socket, messageId }) => {
-    const [isMenuOpen, setIsMenuOpen] = useState(false); 
-    
-    if (message.status === 'self_deleted') { 
+// ─── Message Bubble ───────────────────────────────────────────────────────────
+const MessageBubble = ({ message, isCurrentUser, onDeleteForMe, onDeleteForEveryone }) => {
+    const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+    // Deleted-for-everyone placeholder
+    if (message.deletedForEveryone) {
         return (
-            <div className="text-xs text-gray-500 text-center italic py-1">
-                *Message deleted for you (non-persistent)*
+            <div className={`flex ${isCurrentUser ? 'justify-end' : 'justify-start'}`}>
+                <div className="max-w-xs px-4 py-2 rounded-xl bg-gray-100 text-gray-400 text-xs italic shadow-sm">
+                    🚫 This message was deleted.
+                </div>
             </div>
         );
     }
-    
-    const handleDeleteForSelf = () => {
-        if (socket && messageId) {
-            socket.emit('deleteMessageForSelf', messageId);
-        }
-        setIsMenuOpen(false);
-    };
 
     return (
-        <div className={`flex ${isCurrentUser ? 'justify-end' : 'justify-start'}`}>
-            <div className="flex items-start">
-                {isCurrentUser && (
-                    <div className="relative self-center">
-                        <button 
-                            onClick={() => setIsMenuOpen(!isMenuOpen)} 
-                            className="mr-2 text-gray-400 hover:text-gray-600 transition"
-                        >
-                            <FaEllipsisV className="w-3 h-3"/>
-                        </button>
-                        {isMenuOpen && (
-                            <div className="absolute right-full top-0 mt-1 w-40 bg-white border rounded-md shadow-lg z-20">
-                                <button 
-                                    onClick={handleDeleteForSelf}
+        <div className={`flex ${isCurrentUser ? 'justify-end' : 'justify-start'} group`}>
+            <div className="flex items-start gap-1">
+                {/* Options menu — visible on hover for ALL messages (both users) */}
+                <div className={`relative self-center opacity-0 group-hover:opacity-100 transition-opacity ${isCurrentUser ? 'order-first' : 'order-last'}`}>
+                    <button
+                        onClick={() => setIsMenuOpen(!isMenuOpen)}
+                        className="text-gray-400 hover:text-gray-600 p-1"
+                    >
+                        <FaEllipsisV className="w-3 h-3" />
+                    </button>
+                    {isMenuOpen && (
+                        <div className={`absolute ${isCurrentUser ? 'right-full' : 'left-full'} top-0 w-48 bg-white border rounded-lg shadow-xl z-20 overflow-hidden`}>
+                            {/* Delete for me — available for ALL messages */}
+                            <button
+                                onClick={() => { onDeleteForMe(message._id); setIsMenuOpen(false); }}
+                                className="flex items-center w-full px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+                            >
+                                <FaTrashAlt className="mr-2 text-gray-400" /> Delete for me
+                            </button>
+                            {/* Delete for everyone — only sender can do this */}
+                            {isCurrentUser && (
+                                <button
+                                    onClick={() => { onDeleteForEveryone(message._id); setIsMenuOpen(false); }}
                                     className="flex items-center w-full px-3 py-2 text-xs text-red-600 hover:bg-red-50"
                                 >
-                                    <FaTrashAlt className="mr-2"/> Delete for me
+                                    <FaTrashAlt className="mr-2" /> Delete for everyone
                                 </button>
-                            </div>
-                        )}
-                    </div>
-                )}
-                
+                            )}
+                        </div>
+                    )}
+                </div>
+
                 <div className={`max-w-xs lg:max-w-md px-4 py-2 rounded-xl shadow-md text-sm ${
-                    isCurrentUser 
-                        ? 'bg-indigo-600 text-white rounded-br-none' 
+                    isCurrentUser
+                        ? 'bg-indigo-600 text-white rounded-br-none'
                         : 'bg-gray-200 text-gray-800 rounded-tl-none'
                 }`}>
+                    {!isCurrentUser && message.sender?.name && (
+                        <p className="text-xs font-semibold text-indigo-600 mb-1">{message.sender.name}</p>
+                    )}
                     {message.content}
                     <span className={`block text-xs mt-1 ${isCurrentUser ? 'text-indigo-200' : 'text-gray-500'}`}>
                         {new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -69,323 +80,353 @@ const MessageBubble = ({ message, isCurrentUser, socket, messageId }) => {
 };
 
 
+// ─── Session Banner ───────────────────────────────────────────────────────────
+const SessionBanner = ({ session }) => {
+    if (!session) return null;
+
+    const isExpired = session.status === 'expired' ||
+        (session.status === 'scheduled' && new Date(session.scheduledAt) < new Date());
+
+    if (isExpired) return null; // Expired session → banner hide karo
+
+    const colors = {
+        scheduled: 'bg-blue-50 text-blue-700',
+        completed: 'bg-green-50 text-green-700',
+        rated:     'bg-purple-50 text-purple-700',
+        in_progress: 'bg-yellow-50 text-yellow-700',
+    };
+
+    return (
+        <div className={`p-2 text-center text-sm font-medium border-b ${colors[session.status] || 'bg-gray-50 text-gray-600'}`}>
+            📅 Session: <strong>{session.status.toUpperCase()}</strong> &nbsp;|&nbsp;
+            {new Date(session.scheduledAt).toLocaleString()}
+            {session.isBarter ? ' · FREE Barter' : ' · Credit Used'}
+        </div>
+    );
+};
+
+
+// ─── Chat Window ─────────────────────────────────────────────────────────────
 const ChatWindow = ({ conversation }) => {
     const navigate = useNavigate();
     const { socket, isConnected } = useSocket();
     const { user } = useAuth();
     const [messages, setMessages] = useState([]);
-    const [currentSession, setCurrentSession] = useState(null); 
+    const [currentSession, setCurrentSession] = useState(null);
     const [isMarkingComplete, setIsMarkingComplete] = useState(false);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [sessionError, setSessionError] = useState(null);
-    const [hasFetchedSession, setHasFetchedSession] = useState(false); // ADDED: Track if we already tried
+    const [hasFetchedSession, setHasFetchedSession] = useState(false);
     const messagesEndRef = useRef(null);
 
     const chatId = conversation?.chatId;
-    const isChatActive = conversation?.status === 'active'; 
+    const isChatActive = conversation?.status === 'active';
 
-    const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    };
-    
-    // Data Fetching - FIXED to prevent infinite loop
+    // Session is truly usable only if scheduled AND date not passed
+    const isSessionActive = currentSession &&
+        currentSession.status === 'scheduled' &&
+        new Date(currentSession.scheduledAt) > new Date();
+
+    const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+
+    // ── Fetch messages + session ──────────────────────────────────────────────
     const fetchChatAndSessionData = async () => {
         if (!chatId || !user?._id) return;
 
         try {
-            // 1. Fetch chat history
-            const messagesResponse = await api.get(`/chat/messages/${chatId}`);
-            setMessages(messagesResponse.data || []);
-            
-            // 2. Fetch current active session ONLY ONCE
-            if (!hasFetchedSession) {
-                try {
-                    console.log(`Attempting to fetch session for chatId: ${chatId}`);
-                    const sessionResponse = await api.get(`/sessions/active/${chatId}`);
-                    setCurrentSession(sessionResponse.data);
-                    setSessionError(null);
-                    setHasFetchedSession(true); // Mark as fetched
-                } catch (sessionError) {
-                    // Handle 404 specifically - no session exists yet (this is NORMAL)
-                    if (sessionError.response?.status === 404) { 
-                        console.log('No active session found for this chat (expected behavior)');
-                        setCurrentSession(null);
-                        setSessionError(null);
-                        setHasFetchedSession(true); // Mark as fetched even if 404
-                    } 
-                    // Handle 500 errors - backend is having issues
-                    else if (sessionError.response?.status === 500) {
-                        console.error("Backend error fetching session:", sessionError.response?.data);
-                        setSessionError('Unable to load session data. Backend error.');
-                        setHasFetchedSession(true); // Don't keep retrying on 500
-                    }
-                    // Handle network errors (server down)
-                    else if (sessionError.code === 'ERR_NETWORK' || sessionError.message.includes('ERR_CONNECTION')) {
-                        console.error("Network error - backend may be down:", sessionError);
-                        setSessionError('Cannot connect to server. Please check if the backend is running.');
-                        setHasFetchedSession(true); // Don't keep retrying if server is down
-                    } 
-                    else {
-                        console.error("Unexpected error fetching session:", sessionError);
-                        setSessionError('Failed to load session data.');
-                        setHasFetchedSession(true);
-                    }
+            const messagesRes = await api.get(`/chat/messages/${chatId}`);
+            setMessages(messagesRes.data || []);
+            scrollToBottom();
+        } catch (err) {
+            console.error('Error fetching messages:', err);
+        }
+
+        if (!hasFetchedSession) {
+            try {
+                const sessionRes = await api.get(`/sessions/active/${chatId}`);
+                const session = sessionRes.data;
+
+                // Check if session is expired (date passed but still 'scheduled')
+                if (session && session.status === 'scheduled' && new Date(session.scheduledAt) < new Date()) {
+                    // Mark expired on backend
+                    try {
+                        await api.patch(`/sessions/expire/${session._id}`);
+                    } catch (_) {} // Best effort — don't crash if endpoint missing
+                    setCurrentSession(null); // Hide expired session from UI
+                } else {
+                    setCurrentSession(session);
                 }
-            }
-        } catch (error) {
-            console.error("Error fetching chat data:", error);
-            if (error.code === 'ERR_NETWORK') {
-                setSessionError('Cannot connect to server. Please check if the backend is running.');
+                setSessionError(null);
+            } catch (err) {
+                if (err.response?.status === 404) {
+                    setCurrentSession(null);
+                    setSessionError(null);
+                } else {
+                    setSessionError('Unable to load session data.');
+                }
+            } finally {
+                setHasFetchedSession(true);
             }
         }
-        scrollToBottom();
     };
 
+    // Reset when chatId changes
     useEffect(() => {
-        // Reset fetch flag when chatId changes
         setHasFetchedSession(false);
         setSessionError(null);
         setCurrentSession(null);
+        setMessages([]);
     }, [chatId]);
 
+    // Socket setup + initial fetch
     useEffect(() => {
-        if (chatId && user?._id) {
-            fetchChatAndSessionData();
+        if (!chatId || !user?._id) return;
+        fetchChatAndSessionData();
+        if (!socket) return;
 
-            if (socket) {
-                socket.emit('joinChat', chatId);
-                
-                const handleReceiveMessage = (message) => {
-                    setMessages((prevMessages) => [...prevMessages, message]);
-                    scrollToBottom();
-                };
-                
-                const handleMessageDeleted = ({ messageId }) => {
-                    setMessages(prev => prev.map(msg => 
-                        msg._id === messageId ? { ...msg, status: 'self_deleted' } : msg
-                    ));
-                };
-                
-                const handleNewSessionRequest = (data) => {
-                    if (data.partnerId && data.partnerId.toString() === user._id.toString()) {
-                        alert(data.message + " Please check your Confirm Sessions page.");
-                    }
-                    if (data.chatId === chatId) {
-                        setHasFetchedSession(false); // Allow refetch after new session
-                        fetchChatAndSessionData();
-                    }
-                };
+        socket.emit('joinChat', chatId);
 
-                const handleSessionFinalized = (data) => {
-                    if (data.sessionId) {
-                        alert(data.message);
-                        navigate(`/feedback/${data.sessionId}`);
-                    }
-                };
-                
-                const handleSessionCanceled = (data) => {
-                    if (data.sessionId) {
-                        alert(data.message);
-                        setHasFetchedSession(false); // Allow refetch after cancellation
-                        fetchChatAndSessionData();
-                    }
-                };
-     
-                socket.on('receiveMessage', handleReceiveMessage);
-                socket.on('messageDeleted', handleMessageDeleted); 
-                socket.on('newSessionRequest', handleNewSessionRequest);
-                socket.on('sessionFinalized', handleSessionFinalized);
-                socket.on('sessionCanceled', handleSessionCanceled);
+        const handleReceiveMessage = (message) => {
+            setMessages(prev => [...prev, message]);
+            scrollToBottom();
+        };
 
-                return () => {
-                    socket.off('newSessionRequest', handleNewSessionRequest);
-                    socket.off('sessionFinalized', handleSessionFinalized);
-                    socket.off('sessionCanceled', handleSessionCanceled);
-                    socket.off('receiveMessage', handleReceiveMessage);
-                    socket.off('messageDeleted', handleMessageDeleted);
-                };
+        const handleMessageDeletedForEveryone = ({ messageId }) => {
+            setMessages(prev => prev.map(msg =>
+                msg._id === messageId
+                    ? { ...msg, deletedForEveryone: true, content: 'This message was deleted.' }
+                    : msg
+            ));
+        };
+
+        const handleNewSessionRequest = (data) => {
+            if (data.chatId === chatId) {
+                alert(data.message);
+                setHasFetchedSession(false);
             }
-        }
-    }, [chatId, socket, user?._id, navigate, hasFetchedSession]); // CHANGED: Use hasFetchedSession instead of retryCount
+        };
 
+        const handleSessionFinalized = (data) => {
+            if (data.sessionId) {
+                alert(data.message);
+                navigate(`/feedback/${data.sessionId}`);
+            }
+        };
 
-    const handleScheduleSubmit = async ({ scheduledAt, isBarter }) => {
-        if (!isChatActive) { 
-            alert('You must accept the connection to schedule.'); 
-            return; 
-        }
-        
+        const handleSessionCanceled = (data) => {
+            if (data.sessionId) {
+                alert(data.message);
+                setHasFetchedSession(false);
+            }
+        };
+
+        socket.on('receiveMessage', handleReceiveMessage);
+        socket.on('messageDeletedForEveryone', handleMessageDeletedForEveryone);
+        socket.on('newSessionRequest', handleNewSessionRequest);
+        socket.on('sessionFinalized', handleSessionFinalized);
+        socket.on('sessionCanceled', handleSessionCanceled);
+
+        return () => {
+            socket.off('receiveMessage', handleReceiveMessage);
+            socket.off('messageDeletedForEveryone', handleMessageDeletedForEveryone);
+            socket.off('newSessionRequest', handleNewSessionRequest);
+            socket.off('sessionFinalized', handleSessionFinalized);
+            socket.off('sessionCanceled', handleSessionCanceled);
+            socket.emit('leaveChat', chatId);
+        };
+    }, [chatId, socket, user?._id]);
+
+    useEffect(() => {
+        if (!hasFetchedSession && chatId) fetchChatAndSessionData();
+    }, [hasFetchedSession]);
+
+    // ── Delete for me (works for ALL messages — own or received) ─────────────
+    const handleDeleteForMe = async (messageId) => {
         try {
-            await api.post('/chat/schedule', { 
-                chatId, 
-                scheduledAt, 
-                isBarter 
-            });
-            alert(`Session proposed for ${new Date(scheduledAt).toLocaleString()}. Partner notified.`);
-            setIsModalOpen(false);
-            setHasFetchedSession(false); // Allow refetch after scheduling
-            fetchChatAndSessionData();
-        } catch (error) {
-            console.error('Error scheduling session:', error);
-            if (error.code === 'ERR_NETWORK' || error.message.includes('ERR_CONNECTION')) {
-                alert('Cannot connect to server. Please check if the backend is running.');
-            } else {
-                alert('Failed to schedule session: ' + (error.response?.data?.message || 'Server error.'));
-            }
+            await api.delete(`/chat/message/${messageId}/delete-for-me`);
+            setMessages(prev => prev.filter(msg => msg._id !== messageId));
+        } catch (err) {
+            alert('Failed to delete message.');
         }
     };
-    
+
+    // ── Delete for everyone (only sender) ────────────────────────────────────
+    const handleDeleteForEveryone = async (messageId) => {
+        if (!window.confirm('Delete this message for everyone?')) return;
+        try {
+            await api.delete(`/chat/message/${messageId}/delete-for-everyone`);
+            socket?.emit('messageDeletedForEveryone', { chatId, messageId });
+            setMessages(prev => prev.map(msg =>
+                msg._id === messageId
+                    ? { ...msg, deletedForEveryone: true, content: 'This message was deleted.' }
+                    : msg
+            ));
+        } catch (err) {
+            alert(err.response?.data?.message || 'Failed to delete message for everyone.');
+        }
+    };
+
+    // ── Schedule session ──────────────────────────────────────────────────────
+    const handleScheduleSubmit = async ({ scheduledAt, isBarter }) => {
+        if (!isChatActive) { alert('Connection must be accepted first.'); return; }
+        try {
+            await api.post('/chat/schedule', { chatId, scheduledAt, isBarter });
+            alert(`Session proposed for ${new Date(scheduledAt).toLocaleString()}. Partner notified.`);
+            setIsModalOpen(false);
+            setHasFetchedSession(false);
+        } catch (err) {
+            alert('Failed to schedule: ' + (err.response?.data?.message || 'Server error.'));
+        }
+    };
+
+    // ── Mark as completed ─────────────────────────────────────────────────────
     const handleMarkAsCompleted = async () => {
-        if (!currentSession || currentSession.status !== 'scheduled') {
-            alert('No active scheduled session to mark as complete.');
-            return;
-        }
-
-        if (!window.confirm("Are you sure you want to mark this session as completed? Your partner must also confirm.")) {
-            return;
-        }
-
+        if (!isSessionActive) { alert('No valid scheduled session to mark as complete.'); return; }
+        if (!window.confirm('Mark session as completed? Partner must also confirm.')) return;
         setIsMarkingComplete(true);
         try {
-            const response = await api.post(`/sessions/complete/${currentSession._id}`);
-            
-            if (response.data.message.includes('Session finalized')) {
-                 alert(response.data.message);
-                 setHasFetchedSession(false); // Allow refetch
-                 fetchChatAndSessionData();
-            } else {
-                 alert(response.data.message);
-            }
-
-        } catch (error) {
-            console.error('Error marking session complete:', error);
-            alert('Failed to mark session as complete: ' + (error.response?.data?.message || 'Server error.'));
+            const res = await api.post(`/sessions/complete/${currentSession._id}`);
+            alert(res.data.message);
+            setHasFetchedSession(false);
+        } catch (err) {
+            alert('Failed: ' + (err.response?.data?.message || 'Server error.'));
         } finally {
             setIsMarkingComplete(false);
         }
     };
-    
+
+    // ── Video call ────────────────────────────────────────────────────────────
     const startVideoCall = () => {
-        if (!isChatActive) { 
-            alert('You must accept the connection to start a video call.'); 
-            return; 
-        }
-        if (!currentSession) {
-            alert('You must schedule a session before starting a video call.');
-            return;
-        }
+        if (!isChatActive) { alert('Connection must be accepted first.'); return; }
+        if (!isSessionActive) { alert('Schedule a valid upcoming session first.'); return; }
         navigate(`/video/${currentSession._id}`);
     };
 
-
+    // ── Empty state ───────────────────────────────────────────────────────────
     if (!conversation) {
         return (
-            <div className="flex-grow flex items-center justify-center text-gray-500">
-                Select a conversation or check your requests.
+            <div className="flex-grow flex items-center justify-center text-gray-400 h-full flex-col gap-2">
+                <FaComments className="text-4xl" />
+                <p>Select a conversation to start chatting.</p>
             </div>
         );
     }
 
     return (
-        <div className="flex flex-col h-full border-l">
-            <SessionSchedulerModal 
-                isOpen={isModalOpen} 
+        <div className="flex flex-col h-full">
+            <SessionSchedulerModal
+                isOpen={isModalOpen}
                 onClose={() => setIsModalOpen(false)}
                 onSubmit={handleScheduleSubmit}
             />
 
-            {/* Chat Header */}
-            <div className="flex justify-between items-center p-4 border-b bg-white shadow-sm">
-                <h3 className="text-lg font-semibold text-gray-800">{conversation.partnerName}</h3>
-                <div className="flex space-x-3">
-                    {isChatActive && (
-                        <>
-                            <Button 
-                                variant="primary" 
-                                className="p-2 bg-pink-600 hover:bg-pink-700" 
-                                onClick={handleMarkAsCompleted} 
-                                disabled={isMarkingComplete || !currentSession || currentSession.status !== 'scheduled'}
-                                title={!currentSession ? "Session must be scheduled first" : "Mark as Completed"}
-                            >
-                                {isMarkingComplete ? <FaSpinner className="animate-spin"/> : <FaCheckCircle className="w-5 h-5" />}
-                            </Button>
-                            
-                            <Button 
-                                variant="secondary" 
-                                className="p-2" 
-                                onClick={() => setIsModalOpen(true)} 
-                                disabled={!!currentSession || !!sessionError}
-                                title={currentSession ? "Session already scheduled" : sessionError ? "Cannot schedule - backend error" : "Schedule a new session"}
-                            >
-                                <FaCalendarAlt className="w-5 h-5 text-indigo-500" />
-                            </Button>
-                            
-                            <Button 
-                                variant="secondary" 
-                                className="p-2" 
-                                onClick={startVideoCall} 
-                                disabled={!currentSession}
-                                title={!currentSession ? "Schedule a session first" : "Start video call"}
-                            >
-                                <FaVideo className="w-5 h-5 text-green-500" />
-                            </Button>
-                        </>
-                    )}
+            {/* ── Header ── */}
+            <div className="flex justify-between items-center px-4 py-3 border-b bg-white shadow-sm">
+                <div>
+                    <h3 className="font-semibold text-gray-800 text-base">{conversation.partnerName}</h3>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                        isChatActive ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                    }`}>
+                        {conversation.status.toUpperCase()}
+                    </span>
                 </div>
+
+                {isChatActive && (
+                    <div className="flex items-center gap-2">
+                        {/* Mark Complete */}
+                        <button
+                            onClick={handleMarkAsCompleted}
+                            disabled={isMarkingComplete || !isSessionActive}
+                            title={!isSessionActive ? 'No active scheduled session' : 'Mark session as completed'}
+                            className={`w-9 h-9 rounded-full flex items-center justify-center transition
+                                ${isSessionActive
+                                    ? 'bg-pink-500 hover:bg-pink-600 text-white shadow'
+                                    : 'bg-gray-100 text-gray-300 cursor-not-allowed'}`}
+                        >
+                            {isMarkingComplete
+                                ? <FaSpinner className="animate-spin w-4 h-4" />
+                                : <FaCheckCircle className="w-4 h-4" />}
+                        </button>
+
+                        {/* Schedule */}
+                        <button
+                            onClick={() => setIsModalOpen(true)}
+                            disabled={!!isSessionActive}
+                            title={isSessionActive ? 'Session already scheduled' : 'Schedule a new session'}
+                            className={`w-9 h-9 rounded-full flex items-center justify-center transition
+                                ${!isSessionActive
+                                    ? 'bg-indigo-100 hover:bg-indigo-200 text-indigo-600 shadow'
+                                    : 'bg-gray-100 text-gray-300 cursor-not-allowed'}`}
+                        >
+                            <FaCalendarAlt className="w-4 h-4" />
+                        </button>
+
+                        {/* Video Call */}
+                        <button
+                            onClick={startVideoCall}
+                            disabled={!isSessionActive}
+                            title={!isSessionActive ? 'Schedule a session first' : 'Start video call'}
+                            className={`w-9 h-9 rounded-full flex items-center justify-center transition
+                                ${isSessionActive
+                                    ? 'bg-green-100 hover:bg-green-200 text-green-600 shadow'
+                                    : 'bg-gray-100 text-gray-300 cursor-not-allowed'}`}
+                        >
+                            <FaVideo className="w-4 h-4" />
+                        </button>
+                    </div>
+                )}
             </div>
-            
-            {/* Status Alert for Pending/Rejected Chats */}
-            {conversation.status !== 'active' && (
-                <div className="p-3 text-center bg-yellow-100 text-yellow-700 font-medium">
-                    This chat is <strong>{conversation.status.toUpperCase()}</strong>. It must be accepted to start messaging.
-                </div>
-            )}
-            
-            {/* Backend Error Alert */}
-            {sessionError && (
-                <div className="p-3 text-center bg-red-100 text-red-700 font-medium flex items-center justify-center">
-                    <FaExclamationTriangle className="mr-2" />
-                    {sessionError} 
-                    {sessionError.includes('backend') && (
-                        <span className="ml-2 text-sm">
-                            (Check server console logs for details)
-                        </span>
-                    )}
-                </div>
-            )}
-            
-            {/* Session Status Alert */}
-            {currentSession && !sessionError && (
-                <div className={`p-2 text-center font-medium text-sm ${
-                    currentSession.status === 'scheduled' ? 'bg-blue-100 text-blue-700' : 
-                    currentSession.status === 'completed' ? 'bg-green-100 text-green-700' :
-                    'bg-gray-100 text-gray-700'
-                }`}>
-                    Session Status: <strong>{currentSession.status.toUpperCase()}</strong> | 
-                    Scheduled: {new Date(currentSession.scheduledAt).toLocaleString()} 
-                    {currentSession.isBarter ? ' (FREE Barter)' : ' (Credit Required)'}
+
+            {/* Pending/Rejected Alert */}
+            {!isChatActive && (
+                <div className="p-3 text-center bg-yellow-50 text-yellow-700 text-sm font-medium border-b">
+                    Chat is <strong>{conversation.status.toUpperCase()}</strong>.
+                    {conversation.status === 'pending' && ' Waiting for acceptance.'}
                 </div>
             )}
 
-            {/* Message Area */}
-            <div className="flex-grow p-6 overflow-y-auto space-y-4 bg-gray-50">
-                 {messages.map((msg, index) => (
+            {/* Session Error */}
+            {sessionError && (
+                <div className="p-2 text-center bg-red-50 text-red-600 text-xs flex items-center justify-center border-b gap-2">
+                    <FaExclamationTriangle /> {sessionError}
+                </div>
+            )}
+
+            {/* Session Banner — only shows for valid upcoming sessions */}
+            <SessionBanner session={isSessionActive ? currentSession : null} />
+
+            {/* Expired session notice */}
+            {currentSession && !isSessionActive && currentSession.status === 'scheduled' && (
+                <div className="p-2 text-center bg-gray-50 text-gray-400 text-xs border-b flex items-center justify-center gap-1">
+                    <FaClock className="w-3 h-3" />
+                    Previous session expired. You can schedule a new one.
+                </div>
+            )}
+
+            {/* Messages */}
+            <div className="flex-grow p-4 overflow-y-auto space-y-3 bg-gray-50">
+                {messages.length === 0 && isChatActive && (
+                    <div className="text-center text-gray-400 text-sm mt-8">
+                        No messages yet. Say hello! 👋
+                    </div>
+                )}
+                {messages.map((msg, index) => (
                     <MessageBubble
                         key={msg._id || index}
                         message={msg}
-                        isCurrentUser={msg.sender?.toString() === user?._id?.toString()} 
-                        socket={socket}
-                        messageId={msg._id}
+                        isCurrentUser={(msg.sender?._id || msg.sender)?.toString() === user?._id?.toString()}
+                        onDeleteForMe={handleDeleteForMe}
+                        onDeleteForEveryone={handleDeleteForEveryone}
                     />
                 ))}
                 <div ref={messagesEndRef} />
             </div>
 
             {/* Message Input */}
-            <MessageInput 
+            <MessageInput
                 chatId={chatId}
                 senderId={user?._id}
-                partnerId={conversation?.partnerId}
+                receiverId={conversation?.partnerId}
                 socket={socket}
                 disabled={!isChatActive || !isConnected}
             />

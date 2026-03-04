@@ -1,66 +1,48 @@
-// server/src/controllers/sessionController.js (FULLY FIXED - Compatible with Mock Data)
+// server/src/controllers/sessionController.js
 const Session = require('../models/Session');
 const User = require('../models/User');
-const { getIo } = require('../websocket'); 
+const Chat = require('../models/Chat');
+const { getIo } = require('../websocket');
 
-// Import the mock chats Map from chatController
-const { mockChats } = require('./chatController');
-
-// Helper to determine Teacher/Learner roles from MOCK chat
+// Helper: Determine Teacher/Learner roles from DB chat
 const determineRoles = async (chatId, userId) => {
-    // Get chat from mock data instead of MongoDB
-    const chat = mockChats.get(chatId);
-    
-    if (!chat || chat.status !== 'active') {
+    const chat = await Chat.findOne({ chatId, status: 'active' });
+
+    if (!chat) {
         throw new Error('Chat is not active or does not exist.');
     }
-    
-    // The requester is the one who initiated the connection
-    const requester = chat.requester;
-    
-    // Find the partner who is not the requester
-    const partner = chat.participants.find(p => p !== requester);
 
-    if (!partner) {
+    const requester = chat.requester.toString();
+    const learnerId = userId.toString();
+    const teacherId = chat.participants.find(p => p.toString() !== learnerId)?.toString();
+
+    if (!teacherId) {
         throw new Error('Partner not found in chat participants.');
     }
-    
-    // Determine roles based on who is scheduling
-    // The person scheduling is the learner (requesting the session)
-    const learnerId = userId;
-    // The other person is the teacher
-    const teacherId = chat.participants.find(p => p !== userId);
-    
-    return { learnerId, teacherId, chat, partner };
+
+    return { learnerId, teacherId, chat };
 };
 
-// Helper function to handle reputation and credits
+// Helper: Update reputation and credits after session
 const updateReputationAndCredits = async (session) => {
     const { teacher, learner, isBarter } = session;
 
-    // Update User Counters (Teaching/Learning Ratio)
-    await User.findByIdAndUpdate(teacher, { $inc: { teachingCount: 1 } }); 
-    await User.findByIdAndUpdate(learner, { $inc: { learningCount: 1 } }); 
+    await User.findByIdAndUpdate(teacher, { $inc: { teachingCount: 1, creditBalance: 1 } });
+    await User.findByIdAndUpdate(learner, { $inc: { learningCount: 1 } });
 
-    // Credit Assignment
-    // Teacher always gets 1 Credit for teaching
-    await User.findByIdAndUpdate(teacher, { $inc: { creditBalance: 1 } }); 
-
-    // Learner gets partial credit if it was a FREE Barter
-    if (isBarter) { 
-        await User.findByIdAndUpdate(learner, { $inc: { creditBalance: 0.5 } }); 
+    if (isBarter) {
+        await User.findByIdAndUpdate(learner, { $inc: { creditBalance: 0.5 } });
     }
-    
-    // Update Teacher's Average Rating (only if feedback exists)
+
     if (session.feedback && session.feedback.rating) {
         const teacherUser = await User.findById(teacher);
         const newRatingCount = teacherUser.ratingCount + 1;
-        const currentTotalRating = teacherUser.averageRating * teacherUser.ratingCount;
-        const newAverageRating = (currentTotalRating + session.feedback.rating) / newRatingCount;
+        const currentTotal = teacherUser.averageRating * teacherUser.ratingCount;
+        const newAverage = (currentTotal + session.feedback.rating) / newRatingCount;
 
         await User.findByIdAndUpdate(teacher, {
-            averageRating: newAverageRating,
-            ratingCount: newRatingCount
+            averageRating: newAverage,
+            ratingCount: newRatingCount,
         });
     }
 };
@@ -69,54 +51,38 @@ const updateReputationAndCredits = async (session) => {
 // 1. POST /chat/schedule
 exports.scheduleSession = async (req, res) => {
     const { chatId, scheduledAt, isBarter } = req.body;
-    const userId = req.user.id; 
+    const userId = req.user.id;
     const io = getIo();
 
     try {
-        const { learnerId, teacherId, chat } = await determineRoles(chatId, userId);
-        
-        // CREDIT CHECK & CONSUMPTION (For One-Sided Learning)
+        const { learnerId, teacherId } = await determineRoles(chatId, userId);
+
+        // Credit check for one-sided learning
         if (!isBarter) {
             const learnerUser = await User.findById(learnerId).select('creditBalance');
-            if (learnerUser.creditBalance < 1) {
+            if (!learnerUser || learnerUser.creditBalance < 1) {
                 return res.status(403).json({ message: 'Insufficient skill credits for one-sided learning.' });
             }
-            // Consume credit upon scheduling
-            await User.findByIdAndUpdate(learnerId, { $inc: { creditBalance: -1 } }); 
-            console.log(`1 credit consumed from learner ${learnerId} for scheduling.`);
+            await User.findByIdAndUpdate(learnerId, { $inc: { creditBalance: -1 } });
         }
 
-        // Check if a session already exists for this chat
-        const existingSession = await Session.findOne({ 
-            chatId: chatId, // Store composite chatId directly
-            status: { $in: ['scheduled', 'in_progress', 'completed'] }
-        });
-        
-        if (existingSession) {
-            return res.status(400).json({ message: 'Session already scheduled or completed for this chat.' });
-        }
-
-        // Create the new session with composite chatId
         const newSession = await Session.create({
-            chatId: chatId, // Store the composite chatId (e.g., "user1_user2")
+            chatId,
             learner: learnerId,
             teacher: teacherId,
-            skill: "General Skill Exchange", // Replace with actual skill from Match/Listing
+            skill: 'General Skill Exchange',
             scheduledAt: new Date(scheduledAt),
-            isBarter: isBarter,
-            status: 'scheduled'
+            isBarter,
+            status: 'scheduled',
         });
 
-        // Populate teacher info for notification
-        const teacherUser = await User.findById(teacherId).select('name');
         const learnerUser = await User.findById(learnerId).select('name');
 
-        // NOTIFICATION: Notify the Teacher via Socket.IO
         io.to(teacherId).emit('newSessionRequest', {
             sessionId: newSession._id,
-            chatId: chatId,
+            chatId,
             partnerId: learnerId,
-            message: `New session proposed by ${learnerUser.name} for ${new Date(scheduledAt).toLocaleString()}.`
+            message: `New session proposed by ${learnerUser.name} for ${new Date(scheduledAt).toLocaleString()}.`,
         });
 
         res.status(201).json(newSession);
@@ -126,44 +92,36 @@ exports.scheduleSession = async (req, res) => {
     }
 };
 
-// 2. GET /sessions/active/:chatId 
+
+// 2. GET /sessions/active/:chatId
 exports.getActiveSessionForChat = async (req, res) => {
     const { chatId } = req.params;
     const userId = req.user.id;
 
     try {
-        console.log(`Fetching active session for chatId: ${chatId}, userId: ${userId}`);
-        
-        // Check if chat exists in mock data
-        const chat = mockChats.get(chatId);
-        
-        if (!chat) {
-            return res.status(404).json({ message: 'Chat not found.' });
-        }
-        
-        // Authorization check - ensure user is a participant
-        if (!chat.participants.includes(userId.toString())) {
-            return res.status(403).json({ message: 'Not authorized to view this session.' });
-        }
+        // Verify chat exists and user is participant
+        const chat = await Chat.findOne({ chatId });
+        if (!chat) return res.status(404).json({ message: 'Chat not found.' });
 
-        // Find active session using the composite chatId
-        const session = await Session.findOne({ 
-            chatId: chatId, // Direct lookup with composite chatId
-            status: { $in: ['scheduled', 'in_progress'] } 
+        const isParticipant = chat.participants.some(p => p.toString() === userId.toString());
+        if (!isParticipant) return res.status(403).json({ message: 'Not authorized.' });
+
+        const session = await Session.findOne({
+            chatId,
+            status: { $in: ['scheduled', 'in_progress'] },
         })
         .populate('teacher', 'name')
         .populate('learner', 'name');
 
-        if (!session) {
-            return res.status(404).json({ message: 'No active session found for this chat.' });
-        }
-        
+        if (!session) return res.status(404).json({ message: 'No active session found for this chat.' });
+
         res.status(200).json(session);
     } catch (error) {
-        console.error("Error in getActiveSessionForChat:", error.message, error.stack); 
-        res.status(500).json({ message: 'Server error retrieving active session data.' });
+        console.error('Error in getActiveSessionForChat:', error);
+        res.status(500).json({ message: 'Server error.' });
     }
 };
+
 
 // 3. POST /sessions/complete/:sessionId
 exports.markAsCompleted = async (req, res) => {
@@ -178,82 +136,71 @@ exports.markAsCompleted = async (req, res) => {
         const isParticipant = [session.learner.toString(), session.teacher.toString()].includes(userId.toString());
         if (!isParticipant) return res.status(403).json({ message: 'Not authorized.' });
 
-        // Add user to markedCompletedBy array if not already present
         if (!session.markedCompletedBy.includes(userId)) {
             session.markedCompletedBy.push(userId);
             await session.save();
         }
 
-        // Check if both participants have marked it completed
         if (session.markedCompletedBy.length === 2) {
             session.status = 'completed';
             await session.save();
-            
-            // NOTIFICATION: Notify both users to submit feedback
-            const teacherId = session.teacher.toString();
-            const learnerId = session.learner.toString();
 
-            [teacherId, learnerId].forEach(id => {
+            [session.teacher.toString(), session.learner.toString()].forEach(id => {
                 io.to(id).emit('sessionFinalized', {
                     sessionId: session._id,
-                    message: 'Session finalized! Please submit your feedback to earn rewards and finalize reputation.'
+                    message: 'Session finalized! Please submit feedback to earn rewards.',
                 });
             });
-            
-            return res.status(200).json({ message: 'Session finalized! Both users confirmed completion. Please submit feedback to finalize rewards.' });
+
+            return res.status(200).json({ message: 'Session finalized! Please submit feedback.' });
         }
 
-        res.status(200).json({ message: 'Session marked as complete. Waiting for partner confirmation.' });
-
+        res.status(200).json({ message: 'Marked complete. Waiting for partner confirmation.' });
     } catch (error) {
         console.error('Error in markAsCompleted:', error);
         res.status(500).json({ message: error.message });
     }
 };
 
+
 // 4. POST /sessions/feedback/:sessionId
 exports.submitFeedback = async (req, res) => {
     const { sessionId } = req.params;
     const { rating, comment } = req.body;
-    const userId = req.user.id; 
+    const userId = req.user.id;
     const io = getIo();
 
     try {
         let session = await Session.findById(sessionId);
         if (!session) return res.status(404).json({ message: 'Session not found.' });
-        
-        // Only learners can rate teachers
+
         if (session.learner.toString() !== userId.toString()) {
-            return res.status(403).json({ message: 'Only learners can provide feedback on teachers.' });
+            return res.status(403).json({ message: 'Only learners can provide feedback.' });
         }
-        
+
         if (session.status !== 'completed') {
-            return res.status(400).json({ message: 'Session must be marked as completed before submitting feedback.' });
+            return res.status(400).json({ message: 'Session must be completed before submitting feedback.' });
         }
-        
+
         session.feedback = { rating, comment };
         session.status = 'rated';
         await session.save();
 
-        // CRITICAL: REPUTATION AND CREDIT UPDATE
         await updateReputationAndCredits(session);
-        
-        // NOTIFICATION: Notify both users
-        const teacherId = session.teacher.toString();
-        const learnerId = session.learner.toString();
 
-        [teacherId, learnerId].forEach(id => {
+        [session.teacher.toString(), session.learner.toString()].forEach(id => {
             io.to(id).emit('reputationUpdated', {
-                message: 'Your session rewards (credits/reputation) have been applied!'
+                message: 'Your session rewards have been applied!',
             });
         });
 
-        res.status(200).json({ message: 'Feedback submitted successfully. Reputation and credits updated.' });
+        res.status(200).json({ message: 'Feedback submitted. Reputation and credits updated.' });
     } catch (error) {
         console.error('Error in submitFeedback:', error);
         res.status(500).json({ message: error.message });
     }
 };
+
 
 // 5. GET /sessions/history
 exports.getSessionHistory = async (req, res) => {
@@ -261,7 +208,7 @@ exports.getSessionHistory = async (req, res) => {
     try {
         const sessions = await Session.find({
             $or: [{ teacher: userId }, { learner: userId }],
-            status: { $in: ['completed', 'rated', 'canceled'] }
+            status: { $in: ['completed', 'rated', 'canceled'] },
         })
         .populate('teacher', 'name')
         .populate('learner', 'name')
@@ -269,7 +216,6 @@ exports.getSessionHistory = async (req, res) => {
 
         res.status(200).json(sessions);
     } catch (error) {
-        console.error('Error in getSessionHistory:', error);
         res.status(500).json({ message: error.message });
     }
 };
@@ -277,22 +223,51 @@ exports.getSessionHistory = async (req, res) => {
 // 6. GET /sessions/upcoming
 exports.getUpcomingSessions = async (req, res) => {
     const userId = req.user.id;
+
     try {
         const sessions = await Session.find({
             $or: [{ teacher: userId }, { learner: userId }],
             status: 'scheduled',
-            scheduledAt: { $gt: new Date() }
+            scheduledAt: { $gt: new Date() },
         })
-        .populate('teacher', 'name')
-        .populate('learner', 'name')
-        .sort({ scheduledAt: 1 });
+            .populate('teacher', 'name')
+            .populate('learner', 'name')
+            .sort({ scheduledAt: 1 });
 
-        res.status(200).json(sessions);
+        // ✅ Convert into user-friendly response
+        const formattedSessions = sessions.map(session => {
+
+            const isTeacher =
+                session.teacher._id.toString() === userId.toString();
+
+            const partnerUser = isTeacher
+                ? session.learner
+                : session.teacher;
+
+            return {
+                _id: session._id,
+                skill: session.skill,
+                scheduledAt: session.scheduledAt,
+                chatId: session.chatId,
+
+                // ✅ IMPORTANT — frontend will use these only
+                myRole: isTeacher ? 'Teacher' : 'Learner',
+
+                partner: {
+                    _id: partnerUser._id,
+                    name: partnerUser.name
+                }
+            };
+        });
+
+        res.status(200).json(formattedSessions);
+
     } catch (error) {
-        console.error('Error in getUpcomingSessions:', error);
+        console.error('Error fetching upcoming sessions:', error);
         res.status(500).json({ message: error.message });
     }
 };
+
 
 // 7. POST /sessions/cancel/:sessionId
 exports.cancelSession = async (req, res) => {
@@ -310,23 +285,22 @@ exports.cancelSession = async (req, res) => {
         if (session.status !== 'scheduled') {
             return res.status(400).json({ message: 'Only scheduled sessions can be cancelled.' });
         }
-        
-        // If credit was consumed and session is canceled, refund it
+
+        // Refund credit if one-sided
         if (!session.isBarter) {
             await User.findByIdAndUpdate(session.learner._id, { $inc: { creditBalance: 1 } });
-            console.log(`1 credit refunded to learner ${session.learner._id} due to cancellation.`);
         }
-        
-        // Mark session as cancelled
+
         session.status = 'canceled';
         await session.save();
-        
-        // NOTIFICATION: Notify the partner
-        const partnerId = (session.teacher._id.toString() === userId) ? session.learner._id.toString() : session.teacher._id.toString();
+
+        const partnerId = session.teacher._id.toString() === userId
+            ? session.learner._id.toString()
+            : session.teacher._id.toString();
 
         io.to(partnerId).emit('sessionCanceled', {
             sessionId: session._id,
-            message: `Session for ${session.skill} has been cancelled by your partner.`
+            message: `Session for ${session.skill} has been cancelled by your partner.`,
         });
 
         res.status(200).json({ message: 'Session successfully cancelled.' });

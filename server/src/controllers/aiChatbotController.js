@@ -19,11 +19,18 @@ exports.handleAIChat = asyncHandler(async (req, res) => {
         throw new Error('Message content is required.');
     }
 
-    const prompt = `
-        You are a supportive skill recommendation expert for a skill exchange platform.
-        Based on the user's query ("${message}"), provide friendly, concise advice, and suggest 2-3 links/resources (YouTube, documentation, or online courses) that are most relevant to helping them start learning that skill. 
-        Format your response using Markdown (bold text, bullet points, and links) for easy readability.
-    `;
+ const prompt = `
+    You are a supportive skill recommendation expert for "SkillSync".
+    User Query: "${message}"
+
+    INSTRUCTIONS:
+    1. Provide 2-3 sentences of advice.
+    2. Suggest 2-3 resources. 
+    3. IMPORTANT: For YouTube videos, provide the link on a NEW LINE like this:
+       VIDEO: [Title](https://www.youtube.com/watch?v=VIDEO_ID)
+    4. Use Markdown for other parts.
+    5. Separate sections with (---).
+`;
 
     try {
         const response = await ai.models.generateContent({

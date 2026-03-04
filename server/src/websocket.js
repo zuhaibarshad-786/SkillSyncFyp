@@ -1,5 +1,6 @@
-// server/src/websocket.js (CRITICAL FIX - User Room Management)
+// server/src/websocket.js (PERSISTENT + DELETE FOR EVERYONE BROADCAST)
 const socketIo = require('socket.io');
+const { saveAndBroadcastMessage } = require('./controllers/chatController');
 
 let io;
 
@@ -8,72 +9,68 @@ const initializeSocket = (server) => {
         cors: {
             origin: process.env.CLIENT_URL || "http://localhost:5173",
             methods: ["GET", "POST"],
-            credentials: true
+            credentials: true,
         }
     });
-
-    // CRITICAL: Track user-to-socket mapping for notifications
-    const userSockets = new Map(); // userId -> Set of socketIds
 
     io.on('connection', (socket) => {
         console.log(`✅ Socket connected: ${socket.id}`);
 
-        // CRITICAL: User joins their personal room for notifications
+        // ---------------- AUTH ----------------
         socket.on('authenticate', (userId) => {
             if (!userId) return;
-            
-            console.log(`🔐 User ${userId} authenticated with socket ${socket.id}`);
-            
-            // Join user's personal room (for targeted notifications)
             socket.join(userId.toString());
-            
-            // Track multiple sockets per user (multiple tabs/devices)
-            if (!userSockets.has(userId.toString())) {
-                userSockets.set(userId.toString(), new Set());
-            }
-            userSockets.get(userId.toString()).add(socket.id);
-            
-            console.log(`👤 User ${userId} now has ${userSockets.get(userId.toString()).size} active connection(s)`);
+            console.log(`🔐 User ${userId} authenticated`);
         });
 
-        // Join specific chat room
+        // ---------------- CHAT ----------------
         socket.on('joinChat', (chatId) => {
             socket.join(chatId);
-            console.log(`💬 Socket ${socket.id} joined chat: ${chatId}`);
         });
 
-        // Leave chat room
         socket.on('leaveChat', (chatId) => {
             socket.leave(chatId);
-            console.log(`👋 Socket ${socket.id} left chat: ${chatId}`);
         });
 
-        // Handle chat messages
+        // Save to DB + broadcast
         socket.on('sendMessage', async (messageData) => {
-            try {
-                // Emit to all users in the chat room
-                io.to(messageData.chatId).emit('receiveMessage', messageData);
-            } catch (error) {
-                console.error('Error sending message:', error);
-            }
+            await saveAndBroadcastMessage(io, messageData);
         });
 
-        // Delete message for self (non-persistent)
-        socket.on('deleteMessageForSelf', (messageId) => {
-            socket.emit('messageDeleted', { messageId });
+        // ---------------- DELETE MESSAGE FOR EVERYONE ----------------
+        // After REST API call succeeds, frontend emits this to notify others in room
+        socket.on('messageDeletedForEveryone', ({ chatId, messageId }) => {
+            // Broadcast to everyone in the chat room
+            io.to(chatId).emit('messageDeletedForEveryone', { messageId });
         });
 
-        // Handle disconnection
+        // ===============================
+        // 🎥 VIDEO CALL SIGNALING
+        // ===============================
+        socket.on('joinVideoRoom', (roomId) => {
+            socket.join(roomId);
+            socket.to(roomId).emit('userJoinedVideo', socket.id);
+        });
+
+        socket.on('offer', ({ roomId, offer }) => {
+            socket.to(roomId).emit('offer', offer);
+        });
+
+        socket.on('answer', ({ roomId, answer }) => {
+            socket.to(roomId).emit('answer', answer);
+        });
+
+        socket.on('ice-candidate', ({ roomId, candidate }) => {
+            socket.to(roomId).emit('ice-candidate', candidate);
+        });
+
+        socket.on('leaveVideoRoom', (roomId) => {
+            socket.leave(roomId);
+            socket.to(roomId).emit('userLeftVideo');
+        });
+
         socket.on('disconnect', () => {
             console.log(`❌ Socket disconnected: ${socket.id}`);
-            
-            // Clean up user socket tracking
-            userSockets.forEach((sockets, userId) => {
-                sockets.delete(socket.id);
-                if (sockets.size === 0) {
-                    userSockets.delete(userId);
-                }
-            });
         });
     });
 
@@ -81,9 +78,7 @@ const initializeSocket = (server) => {
 };
 
 const getIo = () => {
-    if (!io) {
-        throw new Error('Socket.io not initialized! Call initializeSocket first.');
-    }
+    if (!io) throw new Error('Socket.io not initialized!');
     return io;
 };
 

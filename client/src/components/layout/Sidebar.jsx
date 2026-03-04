@@ -24,7 +24,7 @@ const navItems = [
     // 🆕 New Top-Level Links
     { name: 'Session Scheduler', path: '/schedule', icon: FaCalendarAlt }, // 👈 New Parent Link
     { name: 'Credits & Wallet', path: '/credits/wallet', icon: FaMoneyBillWave }, // 👈 New Parent Link
-    { name: 'Reputation & Rewards', path: '/reputation/badges', icon: FaTrophy }, // 👈 New Parent Link
+    { name: 'Reputation & Rewards', path: '/rewards', icon: FaTrophy }, // 👈 New Parent Link
 
     { name: 'AI Chat Bot', path: '/ai-chat', icon: FaRobot },
     // { name: 'Settings', path: '/settings', icon: FaCog }, // Assuming this exists
