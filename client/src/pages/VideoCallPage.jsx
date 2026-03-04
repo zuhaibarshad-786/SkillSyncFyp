@@ -1,192 +1,550 @@
 // client/src/pages/VideoCallPage.jsx
-import React, { useState, useEffect, useRef } from 'react';
-import { FaDesktop, FaPhoneSlash, FaMicrophone } from 'react-icons/fa';
-import Button from '../components/common/Button';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import {
+    FaDesktop, FaPhoneSlash, FaMicrophone, FaMicrophoneSlash,
+    FaVideo, FaVideoSlash, FaSpinner, FaExclamationTriangle
+} from 'react-icons/fa';
 import { useSocket } from '../hooks/useSocket';
+import { useAuth } from '../hooks/useAuth';
+import api from '../api/axios';
 
-const servers = {
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+const RTC_CONFIG = {
+    iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+    ],
+};
+
+const stopStream = (stream) => {
+    if (stream) stream.getTracks().forEach(t => t.stop());
 };
 
 const VideoCallPage = () => {
+    const { roomId: sessionId } = useParams(); // route is /video/:roomId
+    const navigate  = useNavigate();
     const { socket } = useSocket();
+    const { user }   = useAuth();
 
-    const localVideoRef = useRef(null);
-    const remoteVideoRef = useRef(null);
-    const peerConnection = useRef(null);
+    // ── Session verification ──────────────────────────────────────────────────
+    const [sessionInfo, setSessionInfo] = useState(null);
+    const [verifyError, setVerifyError] = useState(null);
+    const [isVerifying, setIsVerifying] = useState(true);
 
-    const screenStream = useRef(null);
-    const micStream = useRef(null);
+    // ── Call UI state ─────────────────────────────────────────────────────────
+    // 'connecting' | 'waiting_peer' | 'in_call' | 'ended' | 'error'
+    const [callStatus, setCallStatus] = useState('connecting');
+    const [statusMsg,  setStatusMsg]  = useState('Verifying session…');
 
-    const [isInCall, setIsInCall] = useState(false);
+    // ── Media controls ────────────────────────────────────────────────────────
+    const [isMuted,   setIsMuted]   = useState(false);
+    const [isCamOff,  setIsCamOff]  = useState(false);
     const [isSharing, setIsSharing] = useState(false);
+    const [hasCamera, setHasCamera] = useState(true); // false = audio-only mode
 
-    const roomId = "session_room_123";
+    // ── Refs ──────────────────────────────────────────────────────────────────
+    const localVideoRef  = useRef(null);
+    const remoteVideoRef = useRef(null);
+    const pcRef          = useRef(null);
+    const localStream    = useRef(null);
+    const screenStream   = useRef(null);
 
-    const createPeer = () => {
-        peerConnection.current = new RTCPeerConnection(servers);
-
-        peerConnection.current.ontrack = (event) => {
-            remoteVideoRef.current.srcObject = event.streams[0];
-        };
-
-        peerConnection.current.onicecandidate = (event) => {
-            if (event.candidate) {
-                socket.emit("ice-candidate", {
-                    roomId,
-                    candidate: event.candidate
-                });
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 1. Verify session membership
+    // ═══════════════════════════════════════════════════════════════════════════
+    useEffect(() => {
+        if (!sessionId || sessionId === 'undefined') {
+            setVerifyError('Invalid session link. Please go back to chat and try again.');
+            setCallStatus('error');
+            setIsVerifying(false);
+            return;
+        }
+        const verify = async () => {
+            try {
+                const res = await api.get(`/sessions/verify/${sessionId}`);
+                setSessionInfo(res.data);
+            } catch (err) {
+                setVerifyError(err.response?.data?.message || 'You cannot join this call.');
+                setCallStatus('error');
+            } finally {
+                setIsVerifying(false);
             }
         };
+        verify();
+    }, [sessionId]);
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 2. Get local media — tries camera+mic, falls back to mic-only, then none
+    // ═══════════════════════════════════════════════════════════════════════════
+    const getLocalMedia = useCallback(async () => {
+        // Try camera + mic
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            localStream.current = stream;
+            setHasCamera(true);
+            if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+            return stream;
+        } catch (_) {}
+
+        // Fallback: mic only
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            localStream.current = stream;
+            setHasCamera(false);
+            console.warn('⚠️ No camera found — audio-only mode.');
+            return stream;
+        } catch (_) {}
+
+        // Fallback: silent stream via AudioContext — gives WebRTC real tracks to negotiate
+        console.warn('⚠️ No media devices found — using silent audio stream.');
+        setHasCamera(false);
+        try {
+            const ctx = new AudioContext();
+            const dest = ctx.createMediaStreamDestination();
+            localStream.current = dest.stream;
+            return dest.stream;
+        } catch (_) {
+            // Last resort: truly empty stream
+            const emptyStream = new MediaStream();
+            localStream.current = emptyStream;
+            return emptyStream;
+        }
+    }, []);
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 3. Create RTCPeerConnection
+    // ═══════════════════════════════════════════════════════════════════════════
+    const createPeerConnection = useCallback((stream) => {
+        if (pcRef.current) {
+            pcRef.current.close();
+        }
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+
+        // Add tracks if available
+        if (stream && stream.getTracks().length > 0) {
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+        } else {
+            // No real media: add a silent audio track so ICE has something to negotiate.
+            // Without any tracks some browsers skip ICE candidate gathering entirely.
+            try {
+                const ctx = new AudioContext();
+                const dest = ctx.createMediaStreamDestination();
+                const silentTrack = dest.stream.getAudioTracks()[0];
+                if (silentTrack) pc.addTrack(silentTrack, dest.stream);
+            } catch (_) { /* AudioContext not available in this environment */ }
+        }
+
+        // Remote stream → right video panel
+        pc.ontrack = (event) => {
+            if (remoteVideoRef.current && event.streams[0]) {
+                remoteVideoRef.current.srcObject = event.streams[0];
+            }
+        };
+
+        // ICE candidates → relay through server
+        pc.onicecandidate = (event) => {
+            if (event.candidate && socket) {
+                socket.emit('webrtcIceCandidate', { roomId: sessionId, candidate: event.candidate });
+            }
+        };
+
+        // Primary: RTCPeerConnection connectionState
+        pc.onconnectionstatechange = () => {
+            console.log('🔗 connectionState:', pc.connectionState);
+            if (pc.connectionState === 'connected') {
+                setCallStatus('in_call');
+                setStatusMsg('');
+            } else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+                setCallStatus('ended');
+                setStatusMsg('Connection lost.');
+            }
+        };
+
+        // Fallback: iceConnectionState is more reliable for audio-only / no-camera scenarios
+        pc.oniceconnectionstatechange = () => {
+            console.log('🧊 iceConnectionState:', pc.iceConnectionState);
+            if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+                setCallStatus('in_call');
+                setStatusMsg('');
+            } else if (pc.iceConnectionState === 'failed') {
+                setCallStatus('ended');
+                setStatusMsg('Connection failed — please check your network.');
+            }
+        };
+
+        pcRef.current = pc;
+        return pc;
+    }, [socket, sessionId]);
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 4. Main socket setup — runs once session is verified
+    // ═══════════════════════════════════════════════════════════════════════════
+    useEffect(() => {
+        if (!sessionInfo || !socket) return;
+
+        let mounted = true;
+
+        // ── Define all handlers SYNCHRONOUSLY before any async work ──────────
+        // This ensures React's cleanup can always unregister them.
+
+        const handleWaitingForPeer = () => {
+            if (!mounted) return;
+            setStatusMsg('Waiting for partner to join…');
+        };
+
+        const handleStartWebRTC = async ({ isInitiator }) => {
+            if (!mounted) return;
+            setStatusMsg('Connecting…');
+            // localStream.current is set by getLocalMedia below before joinVideoRoom
+            const pc = createPeerConnection(localStream.current || new MediaStream());
+
+            if (isInitiator) {
+                try {
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    socket.emit('webrtcOffer', { roomId: sessionId, offer });
+                    console.log('📤 Sent offer');
+                } catch (err) {
+                    console.error('createOffer error:', err);
+                }
+            }
+            // Non-initiator: wait for webrtcOffer event
+        };
+
+        const handleWebRTCOffer = async ({ offer }) => {
+            if (!mounted) return;
+            const pc = pcRef.current || createPeerConnection(localStream.current || new MediaStream());
+            try {
+                await pc.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                socket.emit('webrtcAnswer', { roomId: sessionId, answer });
+                console.log('📤 Sent answer');
+            } catch (err) {
+                console.error('createAnswer error:', err);
+            }
+        };
+
+        const handleWebRTCAnswer = async ({ answer }) => {
+            if (!mounted || !pcRef.current) return;
+            try {
+                await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+                console.log('✅ Remote description set');
+            } catch (err) {
+                console.error('setRemoteDescription error:', err);
+            }
+        };
+
+        const handleICECandidate = async ({ candidate }) => {
+            if (!mounted || !pcRef.current) return;
+            try {
+                await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (err) {
+                // Benign — can happen before remoteDescription is set
+            }
+        };
+
+        const handleCallEnded = () => {
+            if (!mounted) return;
+            setCallStatus('ended');
+            setStatusMsg('Partner ended the call.');
+            doCleanup(false);
+        };
+
+        const handleCallError = ({ message: msg }) => {
+            if (!mounted) return;
+            setVerifyError(msg);
+            setCallStatus('error');
+        };
+
+        // Register listeners SYNCHRONOUSLY — before any await
+        socket.on('waitingForPeer',     handleWaitingForPeer);
+        socket.on('startWebRTC',        handleStartWebRTC);
+        socket.on('webrtcOffer',        handleWebRTCOffer);
+        socket.on('webrtcAnswer',       handleWebRTCAnswer);
+        socket.on('webrtcIceCandidate', handleICECandidate);
+        socket.on('callEnded',          handleCallEnded);
+        socket.on('callError',          handleCallError);
+
+        // ── Now do async work (get media, then join room) ─────────────────────
+        const init = async () => {
+            setStatusMsg('Starting devices…');
+            await getLocalMedia(); // sets localStream.current
+            if (!mounted) return;
+
+            setCallStatus('waiting_peer');
+            setStatusMsg('Waiting for partner to join…');
+            // Emit AFTER listeners are registered — server will respond with
+            // waitingForPeer or startWebRTC, which our handlers above will catch
+            socket.emit('joinVideoRoom', { roomId: sessionId });
+        };
+
+        init().catch(err => {
+            if (mounted) {
+                setVerifyError(err.message || 'Failed to start call.');
+                setCallStatus('error');
+            }
+        });
+
+        // ── Cleanup ───────────────────────────────────────────────────────────
+        return () => {
+            mounted = false;
+            socket.off('waitingForPeer',     handleWaitingForPeer);
+            socket.off('startWebRTC',        handleStartWebRTC);
+            socket.off('webrtcOffer',        handleWebRTCOffer);
+            socket.off('webrtcAnswer',       handleWebRTCAnswer);
+            socket.off('webrtcIceCandidate', handleICECandidate);
+            socket.off('callEnded',          handleCallEnded);
+            socket.off('callError',          handleCallError);
+        };
+    }, [sessionInfo, socket]);
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 5. Cleanup
+    // ═══════════════════════════════════════════════════════════════════════════
+    const doCleanup = useCallback((emitEnd = true) => {
+        if (emitEnd && socket && sessionId) {
+            socket.emit('endCall', { roomId: sessionId });
+        }
+        if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }
+        stopStream(localStream.current);
+        stopStream(screenStream.current);
+        localStream.current  = null;
+        screenStream.current = null;
+        if (localVideoRef.current)  localVideoRef.current.srcObject  = null;
+        if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    }, [socket, sessionId]);
+
+    // Cleanup on unmount
+    useEffect(() => {
+        return () => { doCleanup(callStatus !== 'ended'); };
+    }, []);
+
+    const handleEndCall = () => {
+        doCleanup(true);
+        setCallStatus('ended');
+        setStatusMsg('You ended the call.');
     };
 
-    const startCall = async () => {
-        createPeer();
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 6. Media controls
+    // ═══════════════════════════════════════════════════════════════════════════
+    const toggleMute = () => {
+        if (!localStream.current) return;
+        localStream.current.getAudioTracks().forEach(t => { t.enabled = !t.enabled; });
+        setIsMuted(p => !p);
+    };
 
-        // 🎤 Get microphone only
-        micStream.current = await navigator.mediaDevices.getUserMedia({
-            audio: true
-        });
-
-        micStream.current.getTracks().forEach(track => {
-            peerConnection.current.addTrack(track, micStream.current);
-        });
-
-        socket.emit("joinVideoRoom", roomId);
-
-        const offer = await peerConnection.current.createOffer();
-        await peerConnection.current.setLocalDescription(offer);
-
-        socket.emit("offer", { roomId, offer });
-
-        setIsInCall(true);
+    const toggleCamera = () => {
+        if (!localStream.current) return;
+        localStream.current.getVideoTracks().forEach(t => { t.enabled = !t.enabled; });
+        setIsCamOff(p => !p);
     };
 
     const startScreenShare = async () => {
-        screenStream.current = await navigator.mediaDevices.getDisplayMedia({
-            video: true
-        });
-
-        const screenTrack = screenStream.current.getVideoTracks()[0];
-
-        peerConnection.current.addTrack(screenTrack, screenStream.current);
-
-        localVideoRef.current.srcObject = screenStream.current;
-
-        screenTrack.onended = () => {
-            stopScreenShare();
-        };
-
-        setIsSharing(true);
-    };
-
-    const stopScreenShare = () => {
-        if (screenStream.current) {
-            screenStream.current.getTracks().forEach(track => track.stop());
-            screenStream.current = null;
-        }
-        setIsSharing(false);
-    };
-
-    const endCall = () => {
-        socket.emit("leaveVideoRoom", roomId);
-
-        if (peerConnection.current) {
-            peerConnection.current.close();
-        }
-
-        if (screenStream.current) {
-            screenStream.current.getTracks().forEach(track => track.stop());
-        }
-
-        if (micStream.current) {
-            micStream.current.getTracks().forEach(track => track.stop());
-        }
-
-        setIsInCall(false);
-        setIsSharing(false);
-    };
-
-    useEffect(() => {
-        if (!socket) return;
-
-        socket.on("offer", async (offer) => {
-            createPeer();
-
-            micStream.current = await navigator.mediaDevices.getUserMedia({
-                audio: true
-            });
-
-            micStream.current.getTracks().forEach(track => {
-                peerConnection.current.addTrack(track, micStream.current);
-            });
-
-            await peerConnection.current.setRemoteDescription(new RTCSessionDescription(offer));
-
-            const answer = await peerConnection.current.createAnswer();
-            await peerConnection.current.setLocalDescription(answer);
-
-            socket.emit("answer", { roomId, answer });
-
-            setIsInCall(true);
-        });
-
-        socket.on("answer", async (answer) => {
-            await peerConnection.current.setRemoteDescription(new RTCSessionDescription(answer));
-        });
-
-        socket.on("ice-candidate", async (candidate) => {
-            try {
-                await peerConnection.current.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (err) {
-                console.error(err);
+        try {
+            const screen = await navigator.mediaDevices.getDisplayMedia({ video: true });
+            screenStream.current = screen;
+            const screenTrack = screen.getVideoTracks()[0];
+            if (pcRef.current) {
+                const sender = pcRef.current.getSenders().find(s => s.track?.kind === 'video');
+                if (sender) await sender.replaceTrack(screenTrack);
+                else pcRef.current.addTrack(screenTrack, screen);
             }
-        });
+            if (localVideoRef.current) localVideoRef.current.srcObject = screen;
+            setIsSharing(true);
+            screenTrack.onended = stopScreenShare;
+        } catch (err) {
+            console.error('Screen share error:', err);
+        }
+    };
 
-        socket.on("userLeftVideo", () => {
-            endCall();
-        });
+    const stopScreenShare = async () => {
+        if (!screenStream.current) return;
+        stopStream(screenStream.current);
+        screenStream.current = null;
+        if (localStream.current && pcRef.current) {
+            const camTrack = localStream.current.getVideoTracks()[0];
+            const sender   = pcRef.current.getSenders().find(s => s.track?.kind === 'video');
+            if (sender && camTrack) await sender.replaceTrack(camTrack);
+        }
+        if (localVideoRef.current) localVideoRef.current.srcObject = localStream.current;
+        setIsSharing(false);
+    };
 
-        return () => {
-            socket.off("offer");
-            socket.off("answer");
-            socket.off("ice-candidate");
-            socket.off("userLeftVideo");
-        };
-    }, [socket]);
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 7. Render
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (isVerifying) {
+        return (
+            <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">
+                <FaSpinner className="animate-spin text-4xl text-indigo-400 mr-4" />
+                <span className="text-lg">Verifying session…</span>
+            </div>
+        );
+    }
 
+    if (callStatus === 'error' || verifyError) {
+        return (
+            <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+                <div className="bg-gray-800 rounded-2xl p-8 text-center max-w-sm">
+                    <FaExclamationTriangle className="text-5xl text-red-400 mx-auto mb-4" />
+                    <h2 className="text-xl font-bold text-white mb-2">Cannot Join Call</h2>
+                    <p className="text-gray-400 mb-6">{verifyError}</p>
+                    <button
+                        onClick={() => navigate('/chat')}
+                        className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition"
+                    >
+                        Back to Chat
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    if (callStatus === 'ended') {
+        return (
+            <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+                <div className="bg-gray-800 rounded-2xl p-8 text-center max-w-sm">
+                    <div className="text-5xl mb-4">📵</div>
+                    <h2 className="text-xl font-bold text-white mb-2">Call Ended</h2>
+                    <p className="text-gray-400 mb-6">{statusMsg || 'The call has ended.'}</p>
+                    <button
+                        onClick={() => navigate('/chat')}
+                        className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition"
+                    >
+                        Back to Chat
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    // ── Main call UI ──────────────────────────────────────────────────────────
     return (
-        <div className="p-6 bg-gray-900 min-h-[90vh] flex flex-col rounded-lg shadow-2xl">
-            <h1 className="text-3xl font-bold text-white mb-6">Screen Share Session</h1>
+        <div className="flex flex-col h-screen bg-gray-900 text-white select-none">
 
-            <div className="flex-grow grid grid-cols-2 gap-4">
-                <div className="bg-gray-800 rounded-lg overflow-hidden">
-                    <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-3 bg-gray-800 border-b border-gray-700 shrink-0">
+                <div>
+                    <h1 className="font-bold text-lg">
+                        Session with {sessionInfo?.partnerName || '…'}
+                    </h1>
+                    <p className="text-xs text-gray-400">
+                        {sessionInfo?.myRole} · {sessionInfo?.session?.scheduledAt
+                            ? new Date(sessionInfo.session.scheduledAt).toLocaleString()
+                            : ''}
+                    </p>
                 </div>
 
-                <div className="bg-gray-800 rounded-lg overflow-hidden">
-                    <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+                {/* Status badge */}
+                <div className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-sm ${
+                    callStatus === 'in_call'
+                        ? 'bg-green-900/50'
+                        : 'bg-gray-700'
+                }`}>
+                    {callStatus === 'in_call' ? (
+                        <>
+                            <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                            <span className="text-green-300 font-medium">Live</span>
+                        </>
+                    ) : (
+                        <>
+                            <FaSpinner className="animate-spin text-indigo-400 w-3 h-3" />
+                            <span className="text-gray-300">{statusMsg}</span>
+                        </>
+                    )}
                 </div>
             </div>
 
-            <div className="flex justify-center space-x-6 p-4 bg-gray-800 mt-4 rounded-lg">
-                {!isInCall ? (
-                    <Button onClick={startCall} className="bg-green-600 hover:bg-green-700">
-                        Join Session
-                    </Button>
-                ) : (
-                    <>
-                        {!isSharing && (
-                            <Button onClick={startScreenShare} className="bg-blue-600 hover:bg-blue-700">
-                                <FaDesktop /> Share Screen
-                            </Button>
-                        )}
+            {!hasCamera && (
+                <div className="bg-yellow-900/40 text-yellow-300 text-xs text-center py-1.5 px-4">
+                    ⚠️ No camera detected — audio-only mode
+                </div>
+            )}
 
-                        <Button onClick={endCall} className="bg-red-600 hover:bg-red-700">
-                            <FaPhoneSlash /> End Call
-                        </Button>
-                    </>
-                )}
+            {/* Video grid */}
+            <div className="flex-1 grid grid-cols-2 gap-3 p-4 overflow-hidden min-h-0">
+
+                {/* Remote */}
+                <div className="relative bg-gray-800 rounded-2xl overflow-hidden flex items-center justify-center">
+                    <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+                    {callStatus !== 'in_call' && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-800/95">
+                            <div className="w-16 h-16 rounded-full bg-indigo-700 flex items-center justify-center text-3xl mb-3">
+                                👤
+                            </div>
+                            <p className="text-gray-200 font-medium">{sessionInfo?.partnerName}</p>
+                            <p className="text-gray-500 text-xs mt-1 animate-pulse">{statusMsg}</p>
+                        </div>
+                    )}
+                    <div className="absolute bottom-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-2 py-1 text-xs text-white">
+                        {sessionInfo?.partnerName}
+                    </div>
+                </div>
+
+                {/* Local */}
+                <div className="relative bg-gray-800 rounded-2xl overflow-hidden flex items-center justify-center">
+                    {hasCamera && !isCamOff ? (
+                        <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                    ) : (
+                        <div className="flex flex-col items-center justify-center text-gray-500 gap-2">
+                            <FaVideoSlash className="text-4xl" />
+                            <span className="text-xs">{isCamOff ? 'Camera off' : 'No camera'}</span>
+                        </div>
+                    )}
+                    {/* Keep video ref mounted even when hidden so tracks work */}
+                    {hasCamera && isCamOff && (
+                        <video ref={localVideoRef} autoPlay muted playsInline className="hidden" />
+                    )}
+                    <div className="absolute bottom-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-2 py-1 text-xs text-white">
+                        You ({sessionInfo?.myRole})
+                    </div>
+                </div>
+            </div>
+
+            {/* Controls */}
+            <div className="flex items-center justify-center gap-4 py-4 bg-gray-800 border-t border-gray-700 shrink-0">
+                <button
+                    onClick={toggleMute}
+                    title={isMuted ? 'Unmute' : 'Mute'}
+                    className={`w-12 h-12 rounded-full flex items-center justify-center transition ${
+                        isMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-500'
+                    }`}
+                >
+                    {isMuted ? <FaMicrophoneSlash /> : <FaMicrophone />}
+                </button>
+
+                <button
+                    onClick={toggleCamera}
+                    disabled={!hasCamera}
+                    title={!hasCamera ? 'No camera available' : isCamOff ? 'Turn camera on' : 'Turn camera off'}
+                    className={`w-12 h-12 rounded-full flex items-center justify-center transition ${
+                        !hasCamera ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                        : isCamOff ? 'bg-red-600 hover:bg-red-700'
+                        : 'bg-gray-600 hover:bg-gray-500'
+                    }`}
+                >
+                    {isCamOff ? <FaVideoSlash /> : <FaVideo />}
+                </button>
+
+                <button
+                    onClick={isSharing ? stopScreenShare : startScreenShare}
+                    title={isSharing ? 'Stop sharing' : 'Share screen'}
+                    className={`w-12 h-12 rounded-full flex items-center justify-center transition ${
+                        isSharing ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-500'
+                    }`}
+                >
+                    <FaDesktop />
+                </button>
+
+                <button
+                    onClick={handleEndCall}
+                    title="End call"
+                    className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center transition shadow-lg"
+                >
+                    <FaPhoneSlash className="text-xl" />
+                </button>
             </div>
         </div>
     );

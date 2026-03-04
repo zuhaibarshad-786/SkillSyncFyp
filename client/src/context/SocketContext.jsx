@@ -1,63 +1,97 @@
-// client/src/context/SocketContext.js
-import React, { createContext, useContext, useState, useEffect } from 'react';
+// client/src/context/SocketContext.jsx
+// SocketProvider lives OUTSIDE the Router, so useNavigate cannot be used here.
+// Instead, we expose `incomingCall` state and `acceptCall` / `rejectCall` handlers
+// through context. Any component inside the Router (e.g. ChatWindow, a global
+// IncomingCallBanner) can consume these and call useNavigate themselves.
+
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import { useAuth } from '../hooks/useAuth';
 
-// 1. Define the backend URL for the socket connection
 const SOCKET_SERVER_URL = import.meta.env.VITE_APP_API_URL || 'http://localhost:5000';
 
-// 2. Create the Context
 export const SocketContext = createContext();
 
-// 3. Create a custom hook for easy access
-export const useSocket = () => {
-    return useContext(SocketContext);
-};
+export const useSocket = () => useContext(SocketContext);
 
-// 4. Create the Provider Component
 export const SocketProvider = ({ children }) => {
     const { isAuthenticated, user } = useAuth();
-    const [socket, setSocket] = useState(null);
+
+    const [socket,      setSocket]      = useState(null);
     const [isConnected, setIsConnected] = useState(false);
 
+    // incomingCall: null | { sessionId, callerId, callerName }
+    const [incomingCall, setIncomingCall] = useState(null);
+
+    // ── Socket lifecycle ──────────────────────────────────────────────────────
     useEffect(() => {
-        // Only connect the socket if the user is authenticated
-        if (isAuthenticated && user) {
-            
-            // Connect the socket client to the server endpoint
-            const newSocket = io(SOCKET_SERVER_URL, {
-                query: { userId: user._id }, // Pass user ID for server-side tracking/authentication
-                reconnectionAttempts: 5,
-                timeout: 10000,
-            });
-
-            newSocket.on('connect', () => {
-                setIsConnected(true);
-                console.log('Socket connected successfully.');
-            });
-
-            newSocket.on('disconnect', () => {
-                setIsConnected(false);
-                console.log('Socket disconnected.');
-            });
-
-            // Set the socket instance in state
-            setSocket(newSocket);
-
-            // Cleanup function: runs when the component unmounts or dependencies change
-            return () => {
-                newSocket.disconnect();
-            };
-        } else if (socket) {
-            // If the user logs out, disconnect the existing socket
-            socket.disconnect();
-            setSocket(null);
+        if (!isAuthenticated || !user) {
+            setSocket(prev => { prev?.disconnect(); return null; });
+            setIsConnected(false);
+            return;
         }
-    }, [isAuthenticated, user]);
+
+        const newSocket = io(SOCKET_SERVER_URL, {
+            query:                { userId: user._id },
+            reconnectionAttempts: 5,
+            timeout:              10000,
+        });
+
+        newSocket.on('connect', () => {
+            setIsConnected(true);
+            // Authenticate immediately so server maps userId → socketId
+            newSocket.emit('authenticate', user._id);
+            console.log('✅ Socket connected & authenticated.');
+        });
+
+        newSocket.on('disconnect', () => {
+            setIsConnected(false);
+            console.log('❌ Socket disconnected.');
+        });
+
+        // ── Incoming call (from server after partner calls initiateCall) ──────
+        newSocket.on('incomingCall', ({ sessionId, callerId, callerName }) => {
+            console.log(`📞 Incoming call from ${callerName} (session: ${sessionId})`);
+            setIncomingCall({ sessionId, callerId, callerName });
+        });
+
+        // If caller cancels / ends call before we answer, clear the UI
+        newSocket.on('callEnded', () => {
+            setIncomingCall(null);
+        });
+
+        setSocket(newSocket);
+
+        return () => {
+            newSocket.off('incomingCall');
+            newSocket.off('callEnded');
+            newSocket.disconnect();
+        };
+    }, [isAuthenticated, user?._id]);
+
+    // ── acceptCall — emits socket event; caller must navigate themselves ──────
+    // Returns the sessionId so the caller can navigate to /video/:sessionId
+    const acceptCall = useCallback(() => {
+        if (!incomingCall || !socket) return null;
+        const { sessionId } = incomingCall;
+        socket.emit('acceptCall', { sessionId });
+        setIncomingCall(null);
+        return sessionId;          // ← consumer navigates with this
+    }, [incomingCall, socket]);
+
+    // ── rejectCall ────────────────────────────────────────────────────────────
+    const rejectCall = useCallback(() => {
+        if (!incomingCall || !socket) return;
+        socket.emit('rejectCall', { sessionId: incomingCall.sessionId });
+        setIncomingCall(null);
+    }, [incomingCall, socket]);
 
     const value = {
         socket,
         isConnected,
+        incomingCall,   // { sessionId, callerId, callerName } | null
+        acceptCall,     // call this, get sessionId back, then navigate
+        rejectCall,
     };
 
     return (

@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { BrowserRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import Header from './components/layout/Header';
 import Sidebar from './components/layout/Sidebar';
+import IncomingCallBanner from './components/common/IncomingCallBanner';
 import useAuth from './hooks/useAuth';
 
 // --- Page Imports ---
@@ -90,6 +91,8 @@ const MainLayout = () => (
 const App = () => {
     return (
         <Router>
+            {/* IncomingCallBanner must be inside <Router> to use useNavigate */}
+            <IncomingCallBanner />
             <Routes>
                 {/* --- Public Routes --- */}
                 

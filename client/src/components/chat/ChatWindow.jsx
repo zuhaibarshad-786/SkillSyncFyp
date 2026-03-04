@@ -117,12 +117,20 @@ const ChatWindow = ({ conversation }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [sessionError, setSessionError] = useState(null);
     const [hasFetchedSession, setHasFetchedSession] = useState(false);
-    const messagesEndRef = useRef(null);
+    const [isCallingOut, setIsCallingOut] = useState(false);
+    // Refs to avoid stale closures inside socket event handlers
+    const isCallingOutRef   = useRef(false);
+    const currentSessionRef = useRef(null);
+    const messagesEndRef    = useRef(null);
 
     const chatId = conversation?.chatId;
     const isChatActive = conversation?.status === 'active';
 
     // Session is truly usable only if scheduled AND date not passed
+    // Keep refs in sync — socket handlers read refs to avoid stale closures
+    useEffect(() => { isCallingOutRef.current   = isCallingOut;   }, [isCallingOut]);
+    useEffect(() => { currentSessionRef.current = currentSession; }, [currentSession]);
+
     const isSessionActive = currentSession &&
         currentSession.status === 'scheduled' &&
         new Date(currentSession.scheduledAt) > new Date();
@@ -226,12 +234,53 @@ const ChatWindow = ({ conversation }) => {
         socket.on('sessionFinalized', handleSessionFinalized);
         socket.on('sessionCanceled', handleSessionCanceled);
 
+        // ── Call signaling listeners ──────────────────────────────────────────
+        const handleCallRinging = ({ sessionId }) => {
+            // sessionId matches if we just initiated a call for this session
+            console.log('📞 Call ringing — waiting for partner…', sessionId);
+        };
+
+        const handleCallAccepted = ({ sessionId }) => {
+            // Server sends callAccepted ONLY to the specific caller — no need to guard by sessionId.
+            // sessionId comes directly from the server so it's always correct.
+            setIsCallingOut(false);
+            navigate(`/video/${sessionId}`);
+        };
+
+        const handleCallRejected = ({ sessionId, message: msg }) => {
+            setIsCallingOut(false);
+            alert(msg || 'Call was declined by partner.');
+        };
+
+        // If partner ends the call (or hangs up while we're still in "Calling…" state)
+        const handleCallEnded = () => {
+            if (isCallingOutRef.current) {
+                setIsCallingOut(false);
+            }
+        };
+
+        const handleCallError = ({ message: msg }) => {
+            setIsCallingOut(false);
+            alert('Call error: ' + msg);
+        };
+
+        socket.on('callRinging',  handleCallRinging);
+        socket.on('callAccepted', handleCallAccepted);
+        socket.on('callRejected', handleCallRejected);
+        socket.on('callEnded',    handleCallEnded);
+        socket.on('callError',    handleCallError);
+
         return () => {
             socket.off('receiveMessage', handleReceiveMessage);
             socket.off('messageDeletedForEveryone', handleMessageDeletedForEveryone);
             socket.off('newSessionRequest', handleNewSessionRequest);
             socket.off('sessionFinalized', handleSessionFinalized);
             socket.off('sessionCanceled', handleSessionCanceled);
+            socket.off('callRinging',  handleCallRinging);
+            socket.off('callAccepted', handleCallAccepted);
+            socket.off('callRejected', handleCallRejected);
+            socket.off('callEnded',    handleCallEnded);
+            socket.off('callError',    handleCallError);
             socket.emit('leaveChat', chatId);
         };
     }, [chatId, socket, user?._id]);
@@ -295,11 +344,21 @@ const ChatWindow = ({ conversation }) => {
         }
     };
 
-    // ── Video call ────────────────────────────────────────────────────────────
+    // ── Video call — initiate (notify partner via socket) ─────────────────────
     const startVideoCall = () => {
-        if (!isChatActive) { alert('Connection must be accepted first.'); return; }
-        if (!isSessionActive) { alert('Schedule a valid upcoming session first.'); return; }
-        navigate(`/video/${currentSession._id}`);
+        if (!isChatActive)     { alert('Connection must be accepted first.'); return; }
+        if (!isSessionActive)  { alert('Schedule a valid upcoming session first.'); return; }
+        if (!socket)           { alert('Not connected to server.'); return; }
+
+        setIsCallingOut(true);
+        socket.emit('initiateCall', { sessionId: currentSession._id });
+    };
+
+    const cancelOutgoingCall = () => {
+        if (socket && currentSession) {
+            socket.emit('endCall', { roomId: currentSession._id.toString() });
+        }
+        setIsCallingOut(false);
     };
 
     // ── Empty state ───────────────────────────────────────────────────────────
@@ -362,17 +421,30 @@ const ChatWindow = ({ conversation }) => {
                         </button>
 
                         {/* Video Call */}
-                        <button
-                            onClick={startVideoCall}
-                            disabled={!isSessionActive}
-                            title={!isSessionActive ? 'Schedule a session first' : 'Start video call'}
-                            className={`w-9 h-9 rounded-full flex items-center justify-center transition
-                                ${isSessionActive
-                                    ? 'bg-green-100 hover:bg-green-200 text-green-600 shadow'
-                                    : 'bg-gray-100 text-gray-300 cursor-not-allowed'}`}
-                        >
-                            <FaVideo className="w-4 h-4" />
-                        </button>
+                        {isCallingOut ? (
+                            <div className="flex items-center gap-2">
+                                <span className="text-xs text-green-600 font-medium animate-pulse">Calling…</span>
+                                <button
+                                    onClick={cancelOutgoingCall}
+                                    title="Cancel call"
+                                    className="w-9 h-9 rounded-full flex items-center justify-center bg-red-100 hover:bg-red-200 text-red-600 shadow transition"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                onClick={startVideoCall}
+                                disabled={!isSessionActive}
+                                title={!isSessionActive ? 'Schedule a session first' : 'Start video call'}
+                                className={`w-9 h-9 rounded-full flex items-center justify-center transition
+                                    ${isSessionActive
+                                        ? 'bg-green-100 hover:bg-green-200 text-green-600 shadow'
+                                        : 'bg-gray-100 text-gray-300 cursor-not-allowed'}`}
+                            >
+                                <FaVideo className="w-4 h-4" />
+                            </button>
+                        )}
                     </div>
                 )}
             </div>
