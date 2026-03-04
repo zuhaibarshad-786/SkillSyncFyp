@@ -31,9 +31,7 @@
 client/src/api/axios.js
 import axios from "axios";
 
-// Use Vercel environment variable
-const API_URL =
-  import.meta.env.VITE_API_URL || "https://skillsyncfyp.onrender.com";
+const API_URL = import.meta.env.VITE_API_URL||'https://skillsyncfyp.onrender.com';
 
 const api = axios.create({
   baseURL: `${API_URL}/api`,
@@ -43,7 +41,6 @@ const api = axios.create({
   },
 });
 
-// Attach JWT automatically
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem("token");
