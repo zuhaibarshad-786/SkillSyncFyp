@@ -59,17 +59,32 @@ const initializeSocket = (server) => {
         },
     });
 
-    io.on('connection', (socket) => {
-        console.log(`✅ Socket connected: ${socket.id}`);
+// for production
+io.on('connection', (socket) => {
 
-        // ── AUTH ──────────────────────────────────────────────────────────────
-        socket.on('authenticate', (userId) => {
-            if (!userId) return;
-            socket.join(userId.toString());
-            addUserSocket(userId.toString(), socket.id);
-            socket.data.userId = userId.toString();
-            console.log(`🔐 User ${userId} authenticated on socket ${socket.id}`);
-        });
+    const userId = socket.handshake.auth.userId;
+
+    if (userId) {
+        socket.join(userId.toString());
+        addUserSocket(userId.toString(), socket.id);
+        socket.data.userId = userId.toString();
+        console.log(`🔐 User ${userId} connected with socket ${socket.id}`);
+    }
+// 
+
+//  for locally 
+    // io.on('connection', (socket) => {
+    //     console.log(`✅ Socket connected: ${socket.id}`);
+
+    //     // ── AUTH ──────────────────────────────────────────────────────────────
+    //     socket.on('authenticate', (userId) => {
+    //         if (!userId) return;
+    //         socket.join(userId.toString());
+    //         addUserSocket(userId.toString(), socket.id);
+    //         socket.data.userId = userId.toString();
+    //         console.log(`🔐 User ${userId} authenticated on socket ${socket.id}`);
+    //     });
+// 
 
         // ── CHAT ──────────────────────────────────────────────────────────────
         socket.on('joinChat', (chatId) => socket.join(chatId));
