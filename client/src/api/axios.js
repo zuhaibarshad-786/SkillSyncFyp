@@ -1,57 +1,31 @@
-// // client/src/api/axios.js
-// import axios from 'axios';
+// client/src/api/axios.js
+// Base URL is driven entirely by the VITE_API_URL environment variable.
+//   • Local dev  → .env sets VITE_API_URL=http://localhost:5000
+//   • Vercel     → dashboard env var VITE_API_URL=https://skillsyncfyp.onrender.com
+// No hardcoded production URLs live in source code.
 
-// const VITE_API_URL = import.meta.env.VITE_APP_API_URL || 'http://localhost:5000';
-// const api = axios.create({
-//     baseURL: `${VITE_API_URL}/api`,
-//     withCredentials: true,
-//     headers: {
-//         'Content-Type': 'application/json',
-//     },
-// });
+import axios from 'axios';
 
-// // Optional: Add an interceptor to attach Authorization header (JWT)
-// api.interceptors.request.use(
-//     (config) => {
-//         const token = localStorage.getItem('token'); 
-//         if (token) {
-//             config.headers.Authorization = `Bearer ${token}`;
-//         }
-//         return config;
-//     },
-//     (error) => {
-//         return Promise.reject(error);
-//     }
-// );
-
-// export default api;
-
-
-
-client/src/api/axios.js
-import axios from "axios";
-
-const API_URL = import.meta.env.VITE_API_URL||'https://skillsyncfyp.onrender.com';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 const api = axios.create({
-  baseURL: `${API_URL}/api`,
-  withCredentials: true,
-  headers: {
-    "Content-Type": "application/json",
-  },
+    baseURL: `${API_BASE_URL}/api`,
+    withCredentials: true,
+    headers: {
+        'Content-Type': 'application/json',
+    },
 });
 
+// Attach JWT token from localStorage to every request
 api.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem("token");
-
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-
-    return config;
-  },
-  (error) => Promise.reject(error)
+    (config) => {
+        const token = localStorage.getItem('token');
+        if (token) {
+            config.headers.Authorization = `Bearer ${token}`;
+        }
+        return config;
+    },
+    (error) => Promise.reject(error)
 );
 
 export default api;

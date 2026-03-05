@@ -6,7 +6,8 @@ import { useAuth } from '../../hooks/useAuth.jsx';
 import api from '../../api/axios';
 import {
     FaVideo, FaCalendarAlt, FaEllipsisV, FaTrashAlt,
-    FaCheckCircle, FaSpinner, FaExclamationTriangle, FaClock, FaComments
+    FaCheckCircle, FaSpinner, FaExclamationTriangle, FaClock,
+    FaComments, FaWifi,
 } from 'react-icons/fa';
 import MessageInput from './MessageInput';
 import Button from '../common/Button';
@@ -17,7 +18,6 @@ import SessionSchedulerModal from './SessionSchedulerModal';
 const MessageBubble = ({ message, isCurrentUser, onDeleteForMe, onDeleteForEveryone }) => {
     const [isMenuOpen, setIsMenuOpen] = useState(false);
 
-    // Deleted-for-everyone placeholder
     if (message.deletedForEveryone) {
         return (
             <div className={`flex ${isCurrentUser ? 'justify-end' : 'justify-start'}`}>
@@ -31,7 +31,6 @@ const MessageBubble = ({ message, isCurrentUser, onDeleteForMe, onDeleteForEvery
     return (
         <div className={`flex ${isCurrentUser ? 'justify-end' : 'justify-start'} group`}>
             <div className="flex items-start gap-1">
-                {/* Options menu — visible on hover for ALL messages (both users) */}
                 <div className={`relative self-center opacity-0 group-hover:opacity-100 transition-opacity ${isCurrentUser ? 'order-first' : 'order-last'}`}>
                     <button
                         onClick={() => setIsMenuOpen(!isMenuOpen)}
@@ -41,14 +40,12 @@ const MessageBubble = ({ message, isCurrentUser, onDeleteForMe, onDeleteForEvery
                     </button>
                     {isMenuOpen && (
                         <div className={`absolute ${isCurrentUser ? 'right-full' : 'left-full'} top-0 w-48 bg-white border rounded-lg shadow-xl z-20 overflow-hidden`}>
-                            {/* Delete for me — available for ALL messages */}
                             <button
                                 onClick={() => { onDeleteForMe(message._id); setIsMenuOpen(false); }}
                                 className="flex items-center w-full px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
                             >
                                 <FaTrashAlt className="mr-2 text-gray-400" /> Delete for me
                             </button>
-                            {/* Delete for everyone — only sender can do this */}
                             {isCurrentUser && (
                                 <button
                                     onClick={() => { onDeleteForEveryone(message._id); setIsMenuOpen(false); }}
@@ -87,12 +84,12 @@ const SessionBanner = ({ session }) => {
     const isExpired = session.status === 'expired' ||
         (session.status === 'scheduled' && new Date(session.scheduledAt) < new Date());
 
-    if (isExpired) return null; // Expired session → banner hide karo
+    if (isExpired) return null;
 
     const colors = {
-        scheduled: 'bg-blue-50 text-blue-700',
-        completed: 'bg-green-50 text-green-700',
-        rated:     'bg-purple-50 text-purple-700',
+        scheduled:   'bg-blue-50 text-blue-700',
+        completed:   'bg-green-50 text-green-700',
+        rated:       'bg-purple-50 text-purple-700',
         in_progress: 'bg-yellow-50 text-yellow-700',
     };
 
@@ -111,23 +108,28 @@ const ChatWindow = ({ conversation }) => {
     const navigate = useNavigate();
     const { socket, isConnected } = useSocket();
     const { user } = useAuth();
-    const [messages, setMessages] = useState([]);
-    const [currentSession, setCurrentSession] = useState(null);
+    const [messages, setMessages]               = useState([]);
+    const [currentSession, setCurrentSession]   = useState(null);
     const [isMarkingComplete, setIsMarkingComplete] = useState(false);
-    const [isModalOpen, setIsModalOpen] = useState(false);
-    const [sessionError, setSessionError] = useState(null);
+    const [isModalOpen, setIsModalOpen]         = useState(false);
+    const [sessionError, setSessionError]       = useState(null);
     const [hasFetchedSession, setHasFetchedSession] = useState(false);
-    const [isCallingOut, setIsCallingOut] = useState(false);
-    // Refs to avoid stale closures inside socket event handlers
+    const [isCallingOut, setIsCallingOut]       = useState(false);
+
     const isCallingOutRef   = useRef(false);
     const currentSessionRef = useRef(null);
     const messagesEndRef    = useRef(null);
 
-    const chatId = conversation?.chatId;
+    const chatId       = conversation?.chatId;
     const isChatActive = conversation?.status === 'active';
 
-    // Session is truly usable only if scheduled AND date not passed
-    // Keep refs in sync — socket handlers read refs to avoid stale closures
+    // FIX: MessageInput disabled only when chat is inactive (not when socket
+    // temporarily reconnects). isConnected fluctuates during transport upgrade
+    // (polling → websocket) and causes false-positive "disabled" states in
+    // production. The socket itself still queues and delivers messages even
+    // during brief reconnects.
+    const isInputDisabled = !isChatActive;
+
     useEffect(() => { isCallingOutRef.current   = isCallingOut;   }, [isCallingOut]);
     useEffect(() => { currentSessionRef.current = currentSession; }, [currentSession]);
 
@@ -154,13 +156,9 @@ const ChatWindow = ({ conversation }) => {
                 const sessionRes = await api.get(`/sessions/active/${chatId}`);
                 const session = sessionRes.data;
 
-                // Check if session is expired (date passed but still 'scheduled')
                 if (session && session.status === 'scheduled' && new Date(session.scheduledAt) < new Date()) {
-                    // Mark expired on backend
-                    try {
-                        await api.patch(`/sessions/expire/${session._id}`);
-                    } catch (_) {} // Best effort — don't crash if endpoint missing
-                    setCurrentSession(null); // Hide expired session from UI
+                    try { await api.patch(`/sessions/expire/${session._id}`); } catch (_) {}
+                    setCurrentSession(null);
                 } else {
                     setCurrentSession(session);
                 }
@@ -178,7 +176,6 @@ const ChatWindow = ({ conversation }) => {
         }
     };
 
-    // Reset when chatId changes
     useEffect(() => {
         setHasFetchedSession(false);
         setSessionError(null);
@@ -186,7 +183,7 @@ const ChatWindow = ({ conversation }) => {
         setMessages([]);
     }, [chatId]);
 
-    // Socket setup + initial fetch
+    // ── Socket setup + initial fetch ──────────────────────────────────────────
     useEffect(() => {
         if (!chatId || !user?._id) return;
         fetchChatAndSessionData();
@@ -205,6 +202,10 @@ const ChatWindow = ({ conversation }) => {
                     ? { ...msg, deletedForEveryone: true, content: 'This message was deleted.' }
                     : msg
             ));
+        };
+
+        const handleConversationUpdated = ({ chatId: updatedChatId }) => {
+            if (updatedChatId === chatId) fetchChatAndSessionData();
         };
 
         const handleNewSessionRequest = (data) => {
@@ -228,21 +229,12 @@ const ChatWindow = ({ conversation }) => {
             }
         };
 
-        socket.on('receiveMessage', handleReceiveMessage);
-        socket.on('messageDeletedForEveryone', handleMessageDeletedForEveryone);
-        socket.on('newSessionRequest', handleNewSessionRequest);
-        socket.on('sessionFinalized', handleSessionFinalized);
-        socket.on('sessionCanceled', handleSessionCanceled);
-
-        // ── Call signaling listeners ──────────────────────────────────────────
+        // ── Call signaling ────────────────────────────────────────────────────
         const handleCallRinging = ({ sessionId }) => {
-            // sessionId matches if we just initiated a call for this session
             console.log('📞 Call ringing — waiting for partner…', sessionId);
         };
 
         const handleCallAccepted = ({ sessionId }) => {
-            // Server sends callAccepted ONLY to the specific caller — no need to guard by sessionId.
-            // sessionId comes directly from the server so it's always correct.
             setIsCallingOut(false);
             navigate(`/video/${sessionId}`);
         };
@@ -252,11 +244,8 @@ const ChatWindow = ({ conversation }) => {
             alert(msg || 'Call was declined by partner.');
         };
 
-        // If partner ends the call (or hangs up while we're still in "Calling…" state)
         const handleCallEnded = () => {
-            if (isCallingOutRef.current) {
-                setIsCallingOut(false);
-            }
+            if (isCallingOutRef.current) setIsCallingOut(false);
         };
 
         const handleCallError = ({ message: msg }) => {
@@ -264,23 +253,30 @@ const ChatWindow = ({ conversation }) => {
             alert('Call error: ' + msg);
         };
 
-        socket.on('callRinging',  handleCallRinging);
-        socket.on('callAccepted', handleCallAccepted);
-        socket.on('callRejected', handleCallRejected);
-        socket.on('callEnded',    handleCallEnded);
-        socket.on('callError',    handleCallError);
+        socket.on('receiveMessage',              handleReceiveMessage);
+        socket.on('messageDeletedForEveryone',   handleMessageDeletedForEveryone);
+        socket.on('conversationUpdated',         handleConversationUpdated);
+        socket.on('newSessionRequest',           handleNewSessionRequest);
+        socket.on('sessionFinalized',            handleSessionFinalized);
+        socket.on('sessionCanceled',             handleSessionCanceled);
+        socket.on('callRinging',                 handleCallRinging);
+        socket.on('callAccepted',                handleCallAccepted);
+        socket.on('callRejected',                handleCallRejected);
+        socket.on('callEnded',                   handleCallEnded);
+        socket.on('callError',                   handleCallError);
 
         return () => {
-            socket.off('receiveMessage', handleReceiveMessage);
+            socket.off('receiveMessage',            handleReceiveMessage);
             socket.off('messageDeletedForEveryone', handleMessageDeletedForEveryone);
-            socket.off('newSessionRequest', handleNewSessionRequest);
-            socket.off('sessionFinalized', handleSessionFinalized);
-            socket.off('sessionCanceled', handleSessionCanceled);
-            socket.off('callRinging',  handleCallRinging);
-            socket.off('callAccepted', handleCallAccepted);
-            socket.off('callRejected', handleCallRejected);
-            socket.off('callEnded',    handleCallEnded);
-            socket.off('callError',    handleCallError);
+            socket.off('conversationUpdated',       handleConversationUpdated);
+            socket.off('newSessionRequest',         handleNewSessionRequest);
+            socket.off('sessionFinalized',          handleSessionFinalized);
+            socket.off('sessionCanceled',           handleSessionCanceled);
+            socket.off('callRinging',               handleCallRinging);
+            socket.off('callAccepted',              handleCallAccepted);
+            socket.off('callRejected',              handleCallRejected);
+            socket.off('callEnded',                 handleCallEnded);
+            socket.off('callError',                 handleCallError);
             socket.emit('leaveChat', chatId);
         };
     }, [chatId, socket, user?._id]);
@@ -289,17 +285,17 @@ const ChatWindow = ({ conversation }) => {
         if (!hasFetchedSession && chatId) fetchChatAndSessionData();
     }, [hasFetchedSession]);
 
-    // ── Delete for me (works for ALL messages — own or received) ─────────────
+    // ── Delete for me ─────────────────────────────────────────────────────────
     const handleDeleteForMe = async (messageId) => {
         try {
             await api.delete(`/chat/message/${messageId}/delete-for-me`);
             setMessages(prev => prev.filter(msg => msg._id !== messageId));
-        } catch (err) {
+        } catch {
             alert('Failed to delete message.');
         }
     };
 
-    // ── Delete for everyone (only sender) ────────────────────────────────────
+    // ── Delete for everyone ───────────────────────────────────────────────────
     const handleDeleteForEveryone = async (messageId) => {
         if (!window.confirm('Delete this message for everyone?')) return;
         try {
@@ -344,11 +340,11 @@ const ChatWindow = ({ conversation }) => {
         }
     };
 
-    // ── Video call — initiate (notify partner via socket) ─────────────────────
+    // ── Video call — initiate ─────────────────────────────────────────────────
     const startVideoCall = () => {
-        if (!isChatActive)     { alert('Connection must be accepted first.'); return; }
-        if (!isSessionActive)  { alert('Schedule a valid upcoming session first.'); return; }
-        if (!socket)           { alert('Not connected to server.'); return; }
+        if (!isChatActive)    { alert('Connection must be accepted first.'); return; }
+        if (!isSessionActive) { alert('Schedule a valid upcoming session first.'); return; }
+        if (!socket)          { alert('Not connected to server.'); return; }
 
         setIsCallingOut(true);
         socket.emit('initiateCall', { sessionId: currentSession._id });
@@ -381,13 +377,20 @@ const ChatWindow = ({ conversation }) => {
 
             {/* ── Header ── */}
             <div className="flex justify-between items-center px-4 py-3 border-b bg-white shadow-sm">
-                <div>
-                    <h3 className="font-semibold text-gray-800 text-base">{conversation.partnerName}</h3>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                        isChatActive ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
-                    }`}>
-                        {conversation.status.toUpperCase()}
-                    </span>
+                <div className="flex items-center gap-2">
+                    <div>
+                        <h3 className="font-semibold text-gray-800 text-base">{conversation.partnerName}</h3>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                            isChatActive ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                        }`}>
+                            {conversation.status.toUpperCase()}
+                        </span>
+                    </div>
+                    {/* Connection status indicator — informational only, never blocks chat */}
+                    <span
+                        title={isConnected ? 'Real-time connected' : 'Reconnecting…'}
+                        className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? 'bg-green-400' : 'bg-yellow-400 animate-pulse'}`}
+                    />
                 </div>
 
                 {isChatActive && (
@@ -464,7 +467,7 @@ const ChatWindow = ({ conversation }) => {
                 </div>
             )}
 
-            {/* Session Banner — only shows for valid upcoming sessions */}
+            {/* Session Banner */}
             <SessionBanner session={isSessionActive ? currentSession : null} />
 
             {/* Expired session notice */}
@@ -494,13 +497,13 @@ const ChatWindow = ({ conversation }) => {
                 <div ref={messagesEndRef} />
             </div>
 
-            {/* Message Input */}
+            {/* Message Input — disabled ONLY when chat is not yet accepted */}
             <MessageInput
                 chatId={chatId}
                 senderId={user?._id}
                 receiverId={conversation?.partnerId}
                 socket={socket}
-                disabled={!isChatActive || !isConnected}
+                disabled={isInputDisabled}
             />
         </div>
     );

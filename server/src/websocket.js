@@ -4,6 +4,7 @@ const Session  = require('./models/Session');
 
 let io;
 
+// userId (string) → Set<socketId>
 const userSockets = new Map();
 
 const addUserSocket = (userId, socketId) => {
@@ -18,6 +19,7 @@ const removeUserSocket = (userId, socketId) => {
     }
 };
 
+// Emit to ALL sockets of a given user (they may have multiple tabs open)
 const emitToUser = (userId, event, data) => {
     const sids = userSockets.get(userId.toString());
     if (sids) sids.forEach(sid => io.to(sid).emit(event, data));
@@ -45,49 +47,46 @@ const validateSessionParticipant = async (sessionId, userId) => {
     return { session, partnerId };
 };
 
-const activeCalls = new Map(); // sessionId → { callerId }
+// sessionId → { callerId }
+const activeCalls = new Map();
 
-// Track who is ready in each video room: roomId → Set of userIds
+// roomId → Set<userId>
 const roomReadyUsers = new Map();
 
-const initializeSocket = (server) => {
+// ─────────────────────────────────────────────────────────────────────────────
+// initializeSocket
+//   server     : http.Server
+//   corsOptions: cors config object (same one used by Express, so origins match)
+// ─────────────────────────────────────────────────────────────────────────────
+const initializeSocket = (server, corsOptions) => {
     io = socketIo(server, {
-        cors: {
+        // Re-use the same CORS config passed to Express so origins stay in sync
+        cors: corsOptions || {
             origin: process.env.CLIENT_URL || 'http://localhost:5173',
             methods: ['GET', 'POST'],
             credentials: true,
         },
+        // Allow polling transport so Render's cold-start works and clients can
+        // upgrade to websocket once the connection is established.
+        transports: ['polling', 'websocket'],
     });
 
-// for production
-io.on('connection', (socket) => {
+    io.on('connection', (socket) => {
+        // ── AUTH ──────────────────────────────────────────────────────────────
+        // userId is passed via socket.handshake.auth.userId (set by the client)
+        const userId = socket.handshake.auth?.userId;
 
-    const userId = socket.handshake.auth.userId;
-
-    if (userId) {
-        socket.join(userId.toString());
-        addUserSocket(userId.toString(), socket.id);
-        socket.data.userId = userId.toString();
-        console.log(`🔐 User ${userId} connected with socket ${socket.id}`);
-    }
-// 
-
-//  for locally 
-    // io.on('connection', (socket) => {
-    //     console.log(`✅ Socket connected: ${socket.id}`);
-
-    //     // ── AUTH ──────────────────────────────────────────────────────────────
-    //     socket.on('authenticate', (userId) => {
-    //         if (!userId) return;
-    //         socket.join(userId.toString());
-    //         addUserSocket(userId.toString(), socket.id);
-    //         socket.data.userId = userId.toString();
-    //         console.log(`🔐 User ${userId} authenticated on socket ${socket.id}`);
-    //     });
-// 
+        if (userId) {
+            socket.join(userId.toString());
+            addUserSocket(userId.toString(), socket.id);
+            socket.data.userId = userId.toString();
+            console.log(`🔐 User ${userId} connected (socket ${socket.id})`);
+        } else {
+            console.warn(`⚠️  Socket ${socket.id} connected without userId — will not receive targeted events`);
+        }
 
         // ── CHAT ──────────────────────────────────────────────────────────────
-        socket.on('joinChat', (chatId) => socket.join(chatId));
+        socket.on('joinChat',  (chatId) => socket.join(chatId));
         socket.on('leaveChat', (chatId) => socket.leave(chatId));
 
         socket.on('sendMessage', async (messageData) => {
@@ -105,12 +104,18 @@ io.on('connection', (socket) => {
 
         // ══════════════════════════════════════════════════════════════════════
         // 📞 VIDEO CALL SIGNALING
+        // Flow: initiateCall → incomingCall → acceptCall / rejectCall
+        //       → callAccepted / callRejected → joinVideoRoom → startWebRTC
+        //       → webrtcOffer ↔ webrtcAnswer ↔ webrtcIceCandidate → endCall
         // ══════════════════════════════════════════════════════════════════════
 
-        // Step 1: Caller initiates — ring the partner
+        // Step 1 — Caller starts; ring the partner
         socket.on('initiateCall', async ({ sessionId }) => {
             const callerId = socket.data.userId;
-            if (!callerId) { socket.emit('callError', { message: 'Not authenticated.' }); return; }
+            if (!callerId) {
+                socket.emit('callError', { message: 'Not authenticated.' });
+                return;
+            }
 
             try {
                 const { session, partnerId } = await validateSessionParticipant(sessionId, callerId);
@@ -126,16 +131,19 @@ io.on('connection', (socket) => {
                     ? session.teacher.name
                     : session.learner.name;
 
+                // Tell the partner their phone is ringing
                 emitToUser(partnerId, 'incomingCall', { sessionId, callerId, callerName });
+                // Tell the caller we found the partner and are ringing
                 socket.emit('callRinging', { sessionId, partnerId });
-                console.log(`📞 Call initiated: session=${sessionId} caller=${callerId} partner=${partnerId}`);
+
+                console.log(`📞 initiateCall: session=${sessionId} caller=${callerId} partner=${partnerId}`);
             } catch (err) {
                 socket.emit('callError', { message: err.message });
                 activeCalls.delete(sessionId);
             }
         });
 
-        // Step 2a: Receiver accepts — notify caller to navigate to video page
+        // Step 2a — Receiver accepts → notify caller to navigate to /video/:id
         socket.on('acceptCall', async ({ sessionId }) => {
             const accepterId = socket.data.userId;
             if (!accepterId) return;
@@ -146,13 +154,13 @@ io.on('connection', (socket) => {
                 if (callMeta) {
                     emitToUser(callMeta.callerId, 'callAccepted', { sessionId });
                 }
-                console.log(`✅ Call accepted: session=${sessionId} accepter=${accepterId}`);
+                console.log(`✅ acceptCall: session=${sessionId} by=${accepterId}`);
             } catch (err) {
                 socket.emit('callError', { message: err.message });
             }
         });
 
-        // Step 2b: Receiver rejects
+        // Step 2b — Receiver rejects
         socket.on('rejectCall', async ({ sessionId }) => {
             const rejecterId = socket.data.userId;
             try {
@@ -164,46 +172,45 @@ io.on('connection', (socket) => {
                     });
                     activeCalls.delete(sessionId);
                 }
-                console.log(`❌ Call rejected: session=${sessionId} by=${rejecterId}`);
+                console.log(`❌ rejectCall: session=${sessionId} by=${rejecterId}`);
             } catch (err) {
                 console.error('rejectCall error:', err.message);
             }
         });
 
-        // Step 3: Join video room
+        // Step 3 — Join video room after navigation
         socket.on('joinVideoRoom', async ({ roomId }) => {
-            const userId = socket.data.userId;
-            if (!userId) return;
+            const uid = socket.data.userId;
+            if (!uid) return;
 
             try {
-                await validateSessionParticipant(roomId, userId);
+                await validateSessionParticipant(roomId, uid);
                 socket.join(roomId);
 
                 if (!roomReadyUsers.has(roomId)) roomReadyUsers.set(roomId, new Set());
                 const readySet = roomReadyUsers.get(roomId);
 
-                // If this user is already tracked (StrictMode double-emit / reconnect),
-                // just re-send their current state without incrementing the count
-                if (readySet.has(userId)) {
-                    console.log(`🔄 User ${userId} re-joined room ${roomId} (already counted)`);
+                // Handle StrictMode double-fire / reconnects gracefully
+                if (readySet.has(uid)) {
+                    console.log(`🔄 User ${uid} re-joined room ${roomId} (already counted, size=${readySet.size})`);
                     if (readySet.size === 1) {
                         socket.emit('waitingForPeer', { roomId });
                     } else if (readySet.size >= 2) {
-                        // Partner already waiting — this user is the initiator
                         socket.emit('startWebRTC', { roomId, isInitiator: true });
                     }
                     return;
                 }
 
-                readySet.add(userId);
-                console.log(`🎥 User ${userId} joined video room ${roomId} (${readySet.size}/2 ready)`);
+                readySet.add(uid);
+                console.log(`🎥 joinVideoRoom: user=${uid} room=${roomId} (${readySet.size}/2 ready)`);
 
                 if (readySet.size === 1) {
+                    // First user in — wait
                     socket.emit('waitingForPeer', { roomId });
                 } else if (readySet.size >= 2) {
-                    // Both ready — second joiner is initiator (sends offer)
+                    // Both users ready — second joiner creates offer (isInitiator=true)
                     socket.emit('startWebRTC', { roomId, isInitiator: true });
-                    // First joiner is receiver (waits for offer)
+                    // First joiner waits for offer (isInitiator=false)
                     socket.to(roomId).emit('startWebRTC', { roomId, isInitiator: false });
                 }
             } catch (err) {
@@ -211,7 +218,7 @@ io.on('connection', (socket) => {
             }
         });
 
-        // Step 4: WebRTC signaling relay
+        // Step 4 — WebRTC signaling relay (server never inspects SDP/ICE)
         socket.on('webrtcOffer', ({ roomId, offer }) => {
             socket.to(roomId).emit('webrtcOffer', { offer });
         });
@@ -224,36 +231,37 @@ io.on('connection', (socket) => {
             socket.to(roomId).emit('webrtcIceCandidate', { candidate });
         });
 
-        // Step 5: End call — notify partner, clean up room
+        // Step 5 — End call
         socket.on('endCall', ({ roomId }) => {
-            const userId = socket.data.userId;
-            socket.to(roomId).emit('callEnded', { by: userId });
+            const uid = socket.data.userId;
+            socket.to(roomId).emit('callEnded', { by: uid });
             socket.leave(roomId);
             activeCalls.delete(roomId);
-            // Clean up ready set
+
             if (roomReadyUsers.has(roomId)) {
-                roomReadyUsers.get(roomId).delete(userId);
+                roomReadyUsers.get(roomId).delete(uid);
                 if (roomReadyUsers.get(roomId).size === 0) roomReadyUsers.delete(roomId);
             }
-            console.log(`📵 Call ended in room ${roomId} by ${userId}`);
+
+            console.log(`📵 endCall: room=${roomId} by=${uid}`);
         });
 
         // ── Disconnect cleanup ─────────────────────────────────────────────────
         socket.on('disconnect', () => {
-            const userId = socket.data.userId;
-            if (userId) {
-                removeUserSocket(userId, socket.id);
-                // Clean up any video rooms this user was in
+            const uid = socket.data.userId;
+            if (uid) {
+                removeUserSocket(uid, socket.id);
+
+                // If this user was in any video room, notify the peer
                 for (const [roomId, users] of roomReadyUsers.entries()) {
-                    if (users.has(userId)) {
-                        users.delete(userId);
-                        // Notify others in the room
-                        io.to(roomId).emit('callEnded', { by: userId });
+                    if (users.has(uid)) {
+                        users.delete(uid);
+                        io.to(roomId).emit('callEnded', { by: uid });
                         if (users.size === 0) roomReadyUsers.delete(roomId);
                     }
                 }
             }
-            console.log(`❌ Socket disconnected: ${socket.id}`);
+            console.log(`🔌 Socket disconnected: ${socket.id}`);
         });
     });
 
