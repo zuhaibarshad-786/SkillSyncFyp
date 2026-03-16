@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     FaDesktop, FaPhoneSlash, FaMicrophone, FaMicrophoneSlash,
-    FaVideo, FaVideoSlash, FaSpinner, FaExclamationTriangle
+    FaVideo, FaVideoSlash, FaSpinner, FaExclamationTriangle, FaStop
 } from 'react-icons/fa';
 import { useSocket } from '../hooks/useSocket';
 import { useAuth } from '../hooks/useAuth';
@@ -21,7 +21,7 @@ const stopStream = (stream) => {
 };
 
 const VideoCallPage = () => {
-    const { roomId: sessionId } = useParams(); // route is /video/:roomId
+    const { roomId: sessionId } = useParams();
     const navigate  = useNavigate();
     const { socket } = useSocket();
     const { user }   = useAuth();
@@ -32,15 +32,16 @@ const VideoCallPage = () => {
     const [isVerifying, setIsVerifying] = useState(true);
 
     // ── Call UI state ─────────────────────────────────────────────────────────
-    // 'connecting' | 'waiting_peer' | 'in_call' | 'ended' | 'error'
     const [callStatus, setCallStatus] = useState('connecting');
     const [statusMsg,  setStatusMsg]  = useState('Verifying session…');
 
     // ── Media controls ────────────────────────────────────────────────────────
-    const [isMuted,   setIsMuted]   = useState(false);
-    const [isCamOff,  setIsCamOff]  = useState(false);
-    const [isSharing, setIsSharing] = useState(false);
-    const [hasCamera, setHasCamera] = useState(true); // false = audio-only mode
+    const [isMuted,    setIsMuted]    = useState(false);
+    const [isCamOff,   setIsCamOff]   = useState(false);
+    const [isSharing,  setIsSharing]  = useState(false);
+    const [hasCamera,  setHasCamera]  = useState(true);
+    // BUG FIX #5: track screen share error message for user feedback
+    const [shareError, setShareError] = useState('');
 
     // ── Refs ──────────────────────────────────────────────────────────────────
     const localVideoRef  = useRef(null);
@@ -48,6 +49,10 @@ const VideoCallPage = () => {
     const pcRef          = useRef(null);
     const localStream    = useRef(null);
     const screenStream   = useRef(null);
+
+    // BUG FIX #1: Keep stopScreenShare in a ref so screenTrack.onended always
+    // calls the LATEST version — not a stale closure captured at share-start time.
+    const stopScreenShareRef = useRef(null);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // 1. Verify session membership
@@ -74,10 +79,9 @@ const VideoCallPage = () => {
     }, [sessionId]);
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 2. Get local media — tries camera+mic, falls back to mic-only, then none
+    // 2. Get local media
     // ═══════════════════════════════════════════════════════════════════════════
     const getLocalMedia = useCallback(async () => {
-        // Try camera + mic
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             localStream.current = stream;
@@ -86,7 +90,6 @@ const VideoCallPage = () => {
             return stream;
         } catch (_) {}
 
-        // Fallback: mic only
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
             localStream.current = stream;
@@ -95,16 +98,14 @@ const VideoCallPage = () => {
             return stream;
         } catch (_) {}
 
-        // Fallback: silent stream via AudioContext — gives WebRTC real tracks to negotiate
         console.warn('⚠️ No media devices found — using silent audio stream.');
         setHasCamera(false);
         try {
-            const ctx = new AudioContext();
+            const ctx  = new AudioContext();
             const dest = ctx.createMediaStreamDestination();
             localStream.current = dest.stream;
             return dest.stream;
         } catch (_) {
-            // Last resort: truly empty stream
             const emptyStream = new MediaStream();
             localStream.current = emptyStream;
             return emptyStream;
@@ -115,40 +116,33 @@ const VideoCallPage = () => {
     // 3. Create RTCPeerConnection
     // ═══════════════════════════════════════════════════════════════════════════
     const createPeerConnection = useCallback((stream) => {
-        if (pcRef.current) {
-            pcRef.current.close();
-        }
+        if (pcRef.current) pcRef.current.close();
+
         const pc = new RTCPeerConnection(RTC_CONFIG);
 
-        // Add tracks if available
         if (stream && stream.getTracks().length > 0) {
             stream.getTracks().forEach(track => pc.addTrack(track, stream));
         } else {
-            // No real media: add a silent audio track so ICE has something to negotiate.
-            // Without any tracks some browsers skip ICE candidate gathering entirely.
             try {
-                const ctx = new AudioContext();
+                const ctx  = new AudioContext();
                 const dest = ctx.createMediaStreamDestination();
                 const silentTrack = dest.stream.getAudioTracks()[0];
                 if (silentTrack) pc.addTrack(silentTrack, dest.stream);
-            } catch (_) { /* AudioContext not available in this environment */ }
+            } catch (_) {}
         }
 
-        // Remote stream → right video panel
         pc.ontrack = (event) => {
             if (remoteVideoRef.current && event.streams[0]) {
                 remoteVideoRef.current.srcObject = event.streams[0];
             }
         };
 
-        // ICE candidates → relay through server
         pc.onicecandidate = (event) => {
             if (event.candidate && socket) {
                 socket.emit('webrtcIceCandidate', { roomId: sessionId, candidate: event.candidate });
             }
         };
 
-        // Primary: RTCPeerConnection connectionState
         pc.onconnectionstatechange = () => {
             console.log('🔗 connectionState:', pc.connectionState);
             if (pc.connectionState === 'connected') {
@@ -160,7 +154,6 @@ const VideoCallPage = () => {
             }
         };
 
-        // Fallback: iceConnectionState is more reliable for audio-only / no-camera scenarios
         pc.oniceconnectionstatechange = () => {
             console.log('🧊 iceConnectionState:', pc.iceConnectionState);
             if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
@@ -177,15 +170,12 @@ const VideoCallPage = () => {
     }, [socket, sessionId]);
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 4. Main socket setup — runs once session is verified
+    // 4. Main socket setup
     // ═══════════════════════════════════════════════════════════════════════════
     useEffect(() => {
         if (!sessionInfo || !socket) return;
 
         let mounted = true;
-
-        // ── Define all handlers SYNCHRONOUSLY before any async work ──────────
-        // This ensures React's cleanup can always unregister them.
 
         const handleWaitingForPeer = () => {
             if (!mounted) return;
@@ -195,7 +185,6 @@ const VideoCallPage = () => {
         const handleStartWebRTC = async ({ isInitiator }) => {
             if (!mounted) return;
             setStatusMsg('Connecting…');
-            // localStream.current is set by getLocalMedia below before joinVideoRoom
             const pc = createPeerConnection(localStream.current || new MediaStream());
 
             if (isInitiator) {
@@ -208,7 +197,6 @@ const VideoCallPage = () => {
                     console.error('createOffer error:', err);
                 }
             }
-            // Non-initiator: wait for webrtcOffer event
         };
 
         const handleWebRTCOffer = async ({ offer }) => {
@@ -239,9 +227,7 @@ const VideoCallPage = () => {
             if (!mounted || !pcRef.current) return;
             try {
                 await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (err) {
-                // Benign — can happen before remoteDescription is set
-            }
+            } catch (_) {}
         };
 
         const handleCallEnded = () => {
@@ -257,7 +243,6 @@ const VideoCallPage = () => {
             setCallStatus('error');
         };
 
-        // Register listeners SYNCHRONOUSLY — before any await
         socket.on('waitingForPeer',     handleWaitingForPeer);
         socket.on('startWebRTC',        handleStartWebRTC);
         socket.on('webrtcOffer',        handleWebRTCOffer);
@@ -266,16 +251,12 @@ const VideoCallPage = () => {
         socket.on('callEnded',          handleCallEnded);
         socket.on('callError',          handleCallError);
 
-        // ── Now do async work (get media, then join room) ─────────────────────
         const init = async () => {
             setStatusMsg('Starting devices…');
-            await getLocalMedia(); // sets localStream.current
+            await getLocalMedia();
             if (!mounted) return;
-
             setCallStatus('waiting_peer');
             setStatusMsg('Waiting for partner to join…');
-            // Emit AFTER listeners are registered — server will respond with
-            // waitingForPeer or startWebRTC, which our handlers above will catch
             socket.emit('joinVideoRoom', { roomId: sessionId });
         };
 
@@ -286,7 +267,6 @@ const VideoCallPage = () => {
             }
         });
 
-        // ── Cleanup ───────────────────────────────────────────────────────────
         return () => {
             mounted = false;
             socket.off('waitingForPeer',     handleWaitingForPeer);
@@ -315,7 +295,6 @@ const VideoCallPage = () => {
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     }, [socket, sessionId]);
 
-    // Cleanup on unmount
     useEffect(() => {
         return () => { doCleanup(callStatus !== 'ended'); };
     }, []);
@@ -336,40 +315,146 @@ const VideoCallPage = () => {
     };
 
     const toggleCamera = () => {
+        // BUG FIX #5: Disable camera toggle while screen sharing to avoid
+        // confusing state — camera track is not in use during screen share.
+        if (isSharing) return;
         if (!localStream.current) return;
         localStream.current.getVideoTracks().forEach(t => { t.enabled = !t.enabled; });
         setIsCamOff(p => !p);
     };
 
-    const startScreenShare = async () => {
-        try {
-            const screen = await navigator.mediaDevices.getDisplayMedia({ video: true });
-            screenStream.current = screen;
-            const screenTrack = screen.getVideoTracks()[0];
-            if (pcRef.current) {
-                const sender = pcRef.current.getSenders().find(s => s.track?.kind === 'video');
-                if (sender) await sender.replaceTrack(screenTrack);
-                else pcRef.current.addTrack(screenTrack, screen);
-            }
-            if (localVideoRef.current) localVideoRef.current.srcObject = screen;
-            setIsSharing(true);
-            screenTrack.onended = stopScreenShare;
-        } catch (err) {
-            console.error('Screen share error:', err);
-        }
-    };
-
-    const stopScreenShare = async () => {
+    // ── stopScreenShare ────────────────────────────────────────────────────────
+    // BUG FIX #1: Defined as a useCallback so the ref always points to the
+    // latest closure. screenTrack.onended calls stopScreenShareRef.current()
+    // instead of a captured-at-start stale copy.
+    //
+    // BUG FIX #4: Gracefully handles the no-camera case — when localStream has
+    // no video track we simply remove the screen video sender from the PC
+    // rather than trying to replaceTrack with undefined, which threw an error.
+    //
+    // BUG FIX #3: After stopping screen share we renegotiate (createOffer) so
+    // the partner's browser gets updated track info and switches back to camera
+    // (or blank) properly.
+    const stopScreenShare = useCallback(async () => {
         if (!screenStream.current) return;
+
         stopStream(screenStream.current);
         screenStream.current = null;
-        if (localStream.current && pcRef.current) {
-            const camTrack = localStream.current.getVideoTracks()[0];
-            const sender   = pcRef.current.getSenders().find(s => s.track?.kind === 'video');
-            if (sender && camTrack) await sender.replaceTrack(camTrack);
-        }
-        if (localVideoRef.current) localVideoRef.current.srcObject = localStream.current;
         setIsSharing(false);
+        setShareError('');
+
+        const pc = pcRef.current;
+        if (!pc) return;
+
+        const camTrack = localStream.current?.getVideoTracks()[0];
+        const videoSender = pc.getSenders().find(s => s.track?.kind === 'video');
+
+        if (camTrack && videoSender) {
+            // Camera available — swap screen track back to camera track
+            try {
+                await videoSender.replaceTrack(camTrack);
+            } catch (err) {
+                console.error('replaceTrack (screen→cam) error:', err);
+            }
+        } else if (videoSender && !camTrack) {
+            // No camera — remove the video sender entirely so partner sees nothing
+            pc.removeTrack(videoSender);
+        }
+
+        // Restore local preview to camera (or blank if no camera)
+        if (localVideoRef.current) {
+            localVideoRef.current.srcObject = localStream.current || null;
+        }
+
+        // BUG FIX #3: Renegotiate so partner receives updated track state
+        if (pc.signalingState === 'stable' && socket) {
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                socket.emit('webrtcOffer', { roomId: sessionId, offer });
+                console.log('🔄 Renegotiated after screen share stop');
+            } catch (err) {
+                console.warn('Renegotiation after stop-share failed (non-fatal):', err.message);
+            }
+        }
+    }, [socket, sessionId]);
+
+    // Keep the ref in sync with the latest closure
+    useEffect(() => {
+        stopScreenShareRef.current = stopScreenShare;
+    }, [stopScreenShare]);
+
+    // ── startScreenShare ───────────────────────────────────────────────────────
+    // BUG FIX #1: onended calls stopScreenShareRef.current() — always latest fn.
+    // BUG FIX #2: sets isSharing=true BEFORE touching the video element so the
+    //             render condition (`isSharing || (hasCamera && !isCamOff)`) keeps
+    //             localVideoRef in the DOM during screen share.
+    // BUG FIX #3: Renegotiates after replacing the track so the partner's browser
+    //             actually switches to the screen stream.
+    const startScreenShare = async () => {
+        setShareError('');
+        let screen;
+        try {
+            screen = await navigator.mediaDevices.getDisplayMedia({
+                video: { cursor: 'always' },
+                audio: false, // screen audio causes echo; mic audio already in call
+            });
+        } catch (err) {
+            if (err.name === 'NotAllowedError') {
+                setShareError('Screen share permission denied.');
+            } else {
+                setShareError('Could not start screen share.');
+            }
+            console.error('getDisplayMedia error:', err);
+            return;
+        }
+
+        screenStream.current = screen;
+        const screenTrack = screen.getVideoTracks()[0];
+
+        // BUG FIX #1: use ref so this always calls the latest stopScreenShare
+        screenTrack.onended = () => stopScreenShareRef.current?.();
+
+        const pc = pcRef.current;
+        if (pc) {
+            const videoSender = pc.getSenders().find(s => s.track?.kind === 'video');
+            try {
+                if (videoSender) {
+                    // Replace existing video sender track with screen track
+                    await videoSender.replaceTrack(screenTrack);
+                } else {
+                    // No existing video sender (audio-only call) — add a new one
+                    pc.addTrack(screenTrack, screen);
+                }
+            } catch (err) {
+                console.error('replaceTrack (cam→screen) error:', err);
+                stopStream(screen);
+                screenStream.current = null;
+                setShareError('Failed to switch to screen share.');
+                return;
+            }
+        }
+
+        // BUG FIX #2: Set isSharing BEFORE updating srcObject so the video
+        // element stays mounted (render condition includes isSharing).
+        setIsSharing(true);
+        setIsCamOff(false); // camera state no longer relevant while sharing
+
+        if (localVideoRef.current) {
+            localVideoRef.current.srcObject = screen;
+        }
+
+        // BUG FIX #3: Renegotiate so partner switches to the screen stream
+        if (pc && pc.signalingState === 'stable' && socket) {
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                socket.emit('webrtcOffer', { roomId: sessionId, offer });
+                console.log('🖥️  Screen share started — renegotiating with partner');
+            } catch (err) {
+                console.warn('Renegotiation after start-share failed (non-fatal):', err.message);
+            }
+        }
     };
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -421,6 +506,14 @@ const VideoCallPage = () => {
     }
 
     // ── Main call UI ──────────────────────────────────────────────────────────
+    // BUG FIX #2: localVideoRef must stay mounted whenever:
+    //   • Camera is on (hasCamera && !isCamOff)
+    //   • Screen sharing is active (isSharing)
+    // Previously the condition was only (hasCamera && !isCamOff), which removed
+    // the video element from the DOM the moment screen share started with camera
+    // off — breaking localVideoRef and srcObject assignment.
+    const showLocalVideo = isSharing || (hasCamera && !isCamOff);
+
     return (
         <div className="flex flex-col h-screen bg-gray-900 text-white select-none">
 
@@ -437,16 +530,16 @@ const VideoCallPage = () => {
                     </p>
                 </div>
 
-                {/* Status badge */}
                 <div className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-sm ${
-                    callStatus === 'in_call'
-                        ? 'bg-green-900/50'
-                        : 'bg-gray-700'
+                    callStatus === 'in_call' ? 'bg-green-900/50' : 'bg-gray-700'
                 }`}>
                     {callStatus === 'in_call' ? (
                         <>
                             <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
                             <span className="text-green-300 font-medium">Live</span>
+                            {isSharing && (
+                                <span className="ml-1 text-blue-300 text-xs font-medium">· Sharing screen</span>
+                            )}
                         </>
                     ) : (
                         <>
@@ -457,9 +550,26 @@ const VideoCallPage = () => {
                 </div>
             </div>
 
-            {!hasCamera && (
+            {/* Banners */}
+            {!hasCamera && !isSharing && (
                 <div className="bg-yellow-900/40 text-yellow-300 text-xs text-center py-1.5 px-4">
                     ⚠️ No camera detected — audio-only mode
+                </div>
+            )}
+            {isSharing && (
+                <div className="bg-blue-900/50 text-blue-200 text-xs text-center py-1.5 px-4 flex items-center justify-center gap-2">
+                    🖥️ You are sharing your screen —
+                    <button
+                        onClick={stopScreenShare}
+                        className="underline font-semibold hover:text-white transition"
+                    >
+                        Stop sharing
+                    </button>
+                </div>
+            )}
+            {shareError && (
+                <div className="bg-red-900/50 text-red-300 text-xs text-center py-1.5 px-4">
+                    ⚠️ {shareError}
                 </div>
             )}
 
@@ -483,28 +593,37 @@ const VideoCallPage = () => {
                     </div>
                 </div>
 
-                {/* Local */}
+                {/* Local — BUG FIX #2: video element stays in DOM during screen share */}
                 <div className="relative bg-gray-800 rounded-2xl overflow-hidden flex items-center justify-center">
-                    {hasCamera && !isCamOff ? (
-                        <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                    {showLocalVideo ? (
+                        <video
+                            ref={localVideoRef}
+                            autoPlay
+                            muted
+                            playsInline
+                            className="w-full h-full object-cover"
+                        />
                     ) : (
-                        <div className="flex flex-col items-center justify-center text-gray-500 gap-2">
-                            <FaVideoSlash className="text-4xl" />
-                            <span className="text-xs">{isCamOff ? 'Camera off' : 'No camera'}</span>
-                        </div>
-                    )}
-                    {/* Keep video ref mounted even when hidden so tracks work */}
-                    {hasCamera && isCamOff && (
-                        <video ref={localVideoRef} autoPlay muted playsInline className="hidden" />
+                        <>
+                            {/* Placeholder when no camera and not sharing */}
+                            <div className="flex flex-col items-center justify-center text-gray-500 gap-2">
+                                <FaVideoSlash className="text-4xl" />
+                                <span className="text-xs">{isCamOff ? 'Camera off' : 'No camera'}</span>
+                            </div>
+                            {/* Keep ref mounted but hidden so tracks still work */}
+                            <video ref={localVideoRef} autoPlay muted playsInline className="hidden" />
+                        </>
                     )}
                     <div className="absolute bottom-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-2 py-1 text-xs text-white">
-                        You ({sessionInfo?.myRole})
+                        {isSharing ? '🖥️ Your screen' : `You (${sessionInfo?.myRole})`}
                     </div>
                 </div>
             </div>
 
             {/* Controls */}
             <div className="flex items-center justify-center gap-4 py-4 bg-gray-800 border-t border-gray-700 shrink-0">
+
+                {/* Mute */}
                 <button
                     onClick={toggleMute}
                     title={isMuted ? 'Unmute' : 'Mute'}
@@ -515,29 +634,41 @@ const VideoCallPage = () => {
                     {isMuted ? <FaMicrophoneSlash /> : <FaMicrophone />}
                 </button>
 
+                {/* Camera — BUG FIX #5: disabled while sharing screen */}
                 <button
                     onClick={toggleCamera}
-                    disabled={!hasCamera}
-                    title={!hasCamera ? 'No camera available' : isCamOff ? 'Turn camera on' : 'Turn camera off'}
+                    disabled={!hasCamera || isSharing}
+                    title={
+                        isSharing         ? 'Camera unavailable while screen sharing'
+                        : !hasCamera      ? 'No camera available'
+                        : isCamOff        ? 'Turn camera on'
+                        :                   'Turn camera off'
+                    }
                     className={`w-12 h-12 rounded-full flex items-center justify-center transition ${
-                        !hasCamera ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                        : isCamOff ? 'bg-red-600 hover:bg-red-700'
-                        : 'bg-gray-600 hover:bg-gray-500'
+                        !hasCamera || isSharing
+                            ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                            : isCamOff
+                                ? 'bg-red-600 hover:bg-red-700'
+                                : 'bg-gray-600 hover:bg-gray-500'
                     }`}
                 >
                     {isCamOff ? <FaVideoSlash /> : <FaVideo />}
                 </button>
 
+                {/* Screen share */}
                 <button
                     onClick={isSharing ? stopScreenShare : startScreenShare}
-                    title={isSharing ? 'Stop sharing' : 'Share screen'}
+                    title={isSharing ? 'Stop sharing screen' : 'Share your screen'}
                     className={`w-12 h-12 rounded-full flex items-center justify-center transition ${
-                        isSharing ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-500'
+                        isSharing
+                            ? 'bg-blue-600 hover:bg-blue-700 ring-2 ring-blue-400'
+                            : 'bg-gray-600 hover:bg-gray-500'
                     }`}
                 >
-                    <FaDesktop />
+                    {isSharing ? <FaStop className="text-sm" /> : <FaDesktop />}
                 </button>
 
+                {/* End call */}
                 <button
                     onClick={handleEndCall}
                     title="End call"
