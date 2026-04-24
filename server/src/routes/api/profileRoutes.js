@@ -1,41 +1,34 @@
-// // server/src/routes/api/profileRoutes.js
-// const express = require('express');
-// const { 
-//     getUserProfile, 
-//     updateUserProfile, 
-//     createOrUpdateListing 
-// } = require('../../controllers/profileController');
-// const { protect } = require('../../middleware/auth'); // Middleware to ensure user is logged in
-
-// const router = express.Router();
-
-// // Routes protected by authentication
-// router.route('/')
-//     .get(protect, getUserProfile)      // GET /api/profile
-//     .put(protect, updateUserProfile);  // PUT /api/profile
-
-// router.route('/listing')
-//     .post(protect, createOrUpdateListing); // POST /api/profile/listing
-
-// module.exports = router;
+// server/src/routes/api/profileRoutes.js
 
 const express = require('express');
-const { 
-    getUserProfile, 
-    updateUserProfile, 
-    createOrUpdateListing 
+const {
+    getUserProfile,
+    getPublicProfile,
+    updateUserProfile,
+    createOrUpdateListing,
 } = require('../../controllers/profileController');
-const { protect } = require('../../middleware/auth'); // Ensure this file exists at this path
+const { protect } = require('../../middleware/auth');
 
 const router = express.Router();
 
-// Base profile routes: GET and PUT at /api/profile
+// ── Own profile (logged-in user) ──────────────────────────────────────────────
+// GET  /api/profile        → fetch own profile + listing
+// PUT  /api/profile        → update own name / bio / location
 router.route('/')
-    .get(protect, getUserProfile)      // Fetches profile and listing
-    .put(protect, updateUserProfile);  // Updates basic bio/name
+    .get(protect, getUserProfile)
+    .put(protect, updateUserProfile);
 
-// Listing route: POST at /api/profile/listing
+// ── Own listing ───────────────────────────────────────────────────────────────
+// POST /api/profile/listing → create or update skill listing
 router.route('/listing')
-    .post(protect, createOrUpdateListing); // Handles multi-skill priority logic
+    .post(protect, createOrUpdateListing);
+
+// ── Public profile of any user ────────────────────────────────────────────────
+// GET /api/profile/:userId  → read-only, safe public fields only
+//
+// IMPORTANT: this route must come AFTER /listing so that Express doesn't
+// interpret the literal string "listing" as a :userId param.
+router.route('/:userId')
+    .get(protect, getPublicProfile);
 
 module.exports = router;

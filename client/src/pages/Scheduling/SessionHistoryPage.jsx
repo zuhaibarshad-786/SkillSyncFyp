@@ -1,116 +1,111 @@
-// client/src/pages/Scheduling/SessionHistoryPage.jsx (UPDATED)
-import React, { useState, useEffect } from 'react'; // 🆕 Import hooks
+// client/src/pages/Scheduling/SessionHistoryPage.jsx
+import React, { useState, useEffect } from 'react';
 import { FaHistory, FaCheck, FaStar, FaPen, FaSpinner, FaTimes } from 'react-icons/fa';
 import Button from '../../components/common/Button';
 import { useNavigate } from 'react-router-dom';
-import api from '../../api/axios'; // 🆕 Import axios
+import api from '../../api/axios';
 
 const SessionHistoryPage = () => {
     const navigate = useNavigate();
-    // 🆕 Replace mock data with state
-    const [sessions, setSessions] = useState([]); 
+    const [sessions, setSessions] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
 
-    // --- Data Fetching ---
     useEffect(() => {
         const fetchHistory = async () => {
             try {
-                // 🚨 API Call: GET /api/sessions/history (Uses the new Session Controller)
                 const response = await api.get('/sessions/history');
                 setSessions(response.data.map(session => {
-                    // Normalize the backend data to fit the UI needs
-                    const isUserTeacher = session.teacher.name; // Simplified check
-                    const partnerName = isUserTeacher ? session.learner.name : session.teacher.name;
-                    
+                    const isUserTeacher = session.teacher.name;
+                    const partnerName   = isUserTeacher ? session.learner.name : session.teacher.name;
                     return {
-                        id: session._id,
-                        skill: session.skill,
-                        partner: partnerName,
-                        date: new Date(session.scheduledAt).toLocaleDateString(),
-                        role: isUserTeacher ? 'Teacher' : 'Learner',
-                        rating: session.feedback?.rating,
-                        feedbackGiven: session.status === 'rated', // Check if the session has been rated
-                        status: session.status // Can be 'completed', 'rated', or 'canceled'
+                        id:            session._id,
+                        skill:         session.skill,
+                        partner:       partnerName,
+                        date:          new Date(session.scheduledAt).toLocaleDateString(),
+                        role:          isUserTeacher ? 'Teacher' : 'Learner',
+                        rating:        session.feedback?.rating,
+                        feedbackGiven: session.status === 'rated',
+                        status:        session.status,
                     };
                 }));
             } catch (error) {
-                console.error("Failed to fetch session history:", error);
+                console.error('Failed to fetch session history:', error);
             } finally {
                 setIsLoading(false);
             }
         };
         fetchHistory();
     }, []);
-    
-    const handleGiveFeedback = (sessionId) => {
-        // Navigate to the Feedback page, passing the session ID as a parameter
-        navigate(`/feedback/${sessionId}`); 
-    };
 
     if (isLoading) {
-        return <div className="p-8 text-center"><FaSpinner className="animate-spin mr-2 inline"/> Loading session history...</div>;
+        return (
+            <div className="p-8 text-center">
+                <FaSpinner className="animate-spin mr-2 inline" /> Loading session history...
+            </div>
+        );
     }
 
     return (
-        <div className="p-6 bg-white min-h-full rounded-lg shadow-xl">
-            <h1 className="text-3xl font-bold text-gray-900 mb-6 flex items-center">
-                <FaHistory className="mr-3 text-purple-600"/> Session History
-            </h1>
-            <p className="text-gray-600 mb-8">
-                A record of all your completed skill exchange sessions.
-            </p>
+        <div className="space-y-6">
+            <div>
+                <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 flex items-center gap-2">
+                    <FaHistory className="text-purple-600 shrink-0" /> Session History
+                </h1>
+                <p className="text-gray-600 mt-1 text-sm sm:text-base">
+                    A record of all your completed skill exchange sessions.
+                </p>
+            </div>
 
-            <div className="space-y-6">
+            <div className="space-y-4">
                 {sessions.length > 0 ? (
                     sessions.map(session => (
-                        <div key={session.id} className="p-5 border rounded-xl shadow-sm bg-purple-50 border-purple-200">
-                            <div className="flex justify-between items-start">
-                                <div>
-                                    <p className="text-xl font-bold text-gray-800">{session.skill}</p>
-                                    <p className="text-sm text-gray-600">
-                                        Partner: <span className="font-semibold">{session.partner}</span> | Completed: {session.date}
+                        <div key={session.id} className="p-4 sm:p-5 border rounded-xl shadow-sm bg-purple-50 border-purple-200">
+                            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-2">
+                                <div className="min-w-0">
+                                    <p className="text-base sm:text-xl font-bold text-gray-800 truncate">{session.skill}</p>
+                                    <p className="text-xs sm:text-sm text-gray-600">
+                                        Partner: <span className="font-semibold">{session.partner}</span> · {session.date}
                                     </p>
                                 </div>
-                                <div className="text-right">
-                                    <span className={`inline-flex items-center px-3 py-1 text-xs font-semibold rounded-full ${session.role === 'Teacher' ? 'bg-indigo-200 text-indigo-800' : 'bg-pink-200 text-pink-800'}`}>
-                                        {session.role}
-                                    </span>
-                                </div>
+                                <span className={`inline-flex items-center self-start px-2.5 py-0.5 text-xs font-semibold rounded-full shrink-0 ${
+                                    session.role === 'Teacher' ? 'bg-indigo-200 text-indigo-800' : 'bg-pink-200 text-pink-800'
+                                }`}>
+                                    {session.role}
+                                </span>
                             </div>
 
-                            <div className="mt-4 pt-4 border-t border-purple-100 flex justify-between items-center">
+                            <div className="mt-3 pt-3 border-t border-purple-100 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
                                 {session.status === 'canceled' ? (
-                                    <span className="flex items-center text-red-700 font-medium">
-                                        <FaTimes className="mr-2"/> Canceled
+                                    <span className="flex items-center text-red-700 font-medium text-sm">
+                                        <FaTimes className="mr-1.5" /> Canceled
                                     </span>
                                 ) : session.feedbackGiven ? (
-                                    <span className="flex items-center text-green-700 font-medium">
-                                        <FaCheck className="mr-2"/> Feedback Provided 
+                                    <span className="flex items-center text-green-700 font-medium text-sm">
+                                        <FaCheck className="mr-1.5" /> Feedback Provided
                                         {session.rating && (
-                                            <span className="ml-3 flex items-center text-yellow-600">
-                                                <FaStar className="mr-1"/> {session.rating}.0
+                                            <span className="ml-2 flex items-center text-yellow-600">
+                                                <FaStar className="mr-0.5" /> {session.rating}.0
                                             </span>
                                         )}
                                     </span>
                                 ) : (
-                                    <span className="text-red-700 font-medium">Feedback Required</span>
+                                    <span className="text-red-700 font-medium text-sm">Feedback Required</span>
                                 )}
-                                
-                                {/* Only prompt Learners to give feedback if status is 'completed' */}
+
                                 {!session.feedbackGiven && session.role === 'Learner' && session.status === 'completed' && (
-                                    <Button 
-                                        onClick={() => handleGiveFeedback(session.id)}
+                                    <Button
+                                        onClick={() => navigate(`/feedback/${session.id}`)}
                                         variant="primary"
-                                        className="bg-yellow-600 hover:bg-yellow-700 text-sm"
+                                        className="w-full sm:w-auto bg-yellow-600 hover:bg-yellow-700 text-sm justify-center"
                                     >
-                                        <FaPen className="mr-2"/> Give Peer Review
+                                        <FaPen className="mr-2" /> Give Peer Review
                                     </Button>
                                 )}
                             </div>
                         </div>
                     ))
                 ) : (
-                    <div className="text-center py-10 text-gray-500 bg-gray-50 rounded-lg">
+                    <div className="text-center py-10 text-gray-500 bg-gray-50 rounded-lg text-sm">
                         No sessions found in history.
                     </div>
                 )}

@@ -3,10 +3,10 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     FaDesktop, FaPhoneSlash, FaMicrophone, FaMicrophoneSlash,
-    FaVideo, FaVideoSlash, FaSpinner, FaExclamationTriangle, FaStop
+    FaVideo, FaVideoSlash, FaSpinner, FaExclamationTriangle, FaStop,
 } from 'react-icons/fa';
 import { useSocket } from '../hooks/useSocket';
-import { useAuth } from '../hooks/useAuth';
+import { useAuth }   from '../hooks/useAuth';
 import api from '../api/axios';
 
 const RTC_CONFIG = {
@@ -26,37 +26,27 @@ const VideoCallPage = () => {
     const { socket } = useSocket();
     const { user }   = useAuth();
 
-    // ── Session verification ──────────────────────────────────────────────────
     const [sessionInfo, setSessionInfo] = useState(null);
     const [verifyError, setVerifyError] = useState(null);
     const [isVerifying, setIsVerifying] = useState(true);
 
-    // ── Call UI state ─────────────────────────────────────────────────────────
     const [callStatus, setCallStatus] = useState('connecting');
     const [statusMsg,  setStatusMsg]  = useState('Verifying session…');
 
-    // ── Media controls ────────────────────────────────────────────────────────
     const [isMuted,    setIsMuted]    = useState(false);
     const [isCamOff,   setIsCamOff]   = useState(false);
     const [isSharing,  setIsSharing]  = useState(false);
     const [hasCamera,  setHasCamera]  = useState(true);
-    // BUG FIX #5: track screen share error message for user feedback
     const [shareError, setShareError] = useState('');
 
-    // ── Refs ──────────────────────────────────────────────────────────────────
-    const localVideoRef  = useRef(null);
-    const remoteVideoRef = useRef(null);
-    const pcRef          = useRef(null);
-    const localStream    = useRef(null);
-    const screenStream   = useRef(null);
-
-    // BUG FIX #1: Keep stopScreenShare in a ref so screenTrack.onended always
-    // calls the LATEST version — not a stale closure captured at share-start time.
+    const localVideoRef      = useRef(null);
+    const remoteVideoRef     = useRef(null);
+    const pcRef              = useRef(null);
+    const localStream        = useRef(null);
+    const screenStream       = useRef(null);
     const stopScreenShareRef = useRef(null);
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 1. Verify session membership
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── 1. Verify session ─────────────────────────────────────────────────────
     useEffect(() => {
         if (!sessionId || sessionId === 'undefined') {
             setVerifyError('Invalid session link. Please go back to chat and try again.');
@@ -78,9 +68,7 @@ const VideoCallPage = () => {
         verify();
     }, [sessionId]);
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 2. Get local media
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── 2. Get local media ────────────────────────────────────────────────────
     const getLocalMedia = useCallback(async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -89,16 +77,12 @@ const VideoCallPage = () => {
             if (localVideoRef.current) localVideoRef.current.srcObject = stream;
             return stream;
         } catch (_) {}
-
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
             localStream.current = stream;
             setHasCamera(false);
-            console.warn('⚠️ No camera found — audio-only mode.');
             return stream;
         } catch (_) {}
-
-        console.warn('⚠️ No media devices found — using silent audio stream.');
         setHasCamera(false);
         try {
             const ctx  = new AudioContext();
@@ -106,18 +90,15 @@ const VideoCallPage = () => {
             localStream.current = dest.stream;
             return dest.stream;
         } catch (_) {
-            const emptyStream = new MediaStream();
-            localStream.current = emptyStream;
-            return emptyStream;
+            const empty = new MediaStream();
+            localStream.current = empty;
+            return empty;
         }
     }, []);
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 3. Create RTCPeerConnection
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── 3. Create RTCPeerConnection ───────────────────────────────────────────
     const createPeerConnection = useCallback((stream) => {
         if (pcRef.current) pcRef.current.close();
-
         const pc = new RTCPeerConnection(RTC_CONFIG);
 
         if (stream && stream.getTracks().length > 0) {
@@ -126,8 +107,8 @@ const VideoCallPage = () => {
             try {
                 const ctx  = new AudioContext();
                 const dest = ctx.createMediaStreamDestination();
-                const silentTrack = dest.stream.getAudioTracks()[0];
-                if (silentTrack) pc.addTrack(silentTrack, dest.stream);
+                const st   = dest.stream.getAudioTracks()[0];
+                if (st) pc.addTrack(st, dest.stream);
             } catch (_) {}
         }
 
@@ -136,70 +117,45 @@ const VideoCallPage = () => {
                 remoteVideoRef.current.srcObject = event.streams[0];
             }
         };
-
         pc.onicecandidate = (event) => {
             if (event.candidate && socket) {
                 socket.emit('webrtcIceCandidate', { roomId: sessionId, candidate: event.candidate });
             }
         };
-
         pc.onconnectionstatechange = () => {
-            console.log('🔗 connectionState:', pc.connectionState);
-            if (pc.connectionState === 'connected') {
-                setCallStatus('in_call');
-                setStatusMsg('');
-            } else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
-                setCallStatus('ended');
-                setStatusMsg('Connection lost.');
+            if (pc.connectionState === 'connected') { setCallStatus('in_call'); setStatusMsg(''); }
+            else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+                setCallStatus('ended'); setStatusMsg('Connection lost.');
             }
         };
-
         pc.oniceconnectionstatechange = () => {
-            console.log('🧊 iceConnectionState:', pc.iceConnectionState);
-            if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
-                setCallStatus('in_call');
-                setStatusMsg('');
-            } else if (pc.iceConnectionState === 'failed') {
-                setCallStatus('ended');
-                setStatusMsg('Connection failed — please check your network.');
-            }
+            if (['connected', 'completed'].includes(pc.iceConnectionState)) { setCallStatus('in_call'); setStatusMsg(''); }
+            else if (pc.iceConnectionState === 'failed') { setCallStatus('ended'); setStatusMsg('Connection failed.'); }
         };
 
         pcRef.current = pc;
         return pc;
     }, [socket, sessionId]);
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 4. Main socket setup
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── 4. Socket setup ───────────────────────────────────────────────────────
     useEffect(() => {
         if (!sessionInfo || !socket) return;
-
         let mounted = true;
 
-        const handleWaitingForPeer = () => {
-            if (!mounted) return;
-            setStatusMsg('Waiting for partner to join…');
-        };
-
-        const handleStartWebRTC = async ({ isInitiator }) => {
+        const handleWaitingForPeer = () => { if (mounted) setStatusMsg('Waiting for partner…'); };
+        const handleStartWebRTC    = async ({ isInitiator }) => {
             if (!mounted) return;
             setStatusMsg('Connecting…');
             const pc = createPeerConnection(localStream.current || new MediaStream());
-
             if (isInitiator) {
                 try {
                     const offer = await pc.createOffer();
                     await pc.setLocalDescription(offer);
                     socket.emit('webrtcOffer', { roomId: sessionId, offer });
-                    console.log('📤 Sent offer');
-                } catch (err) {
-                    console.error('createOffer error:', err);
-                }
+                } catch (err) { console.error('createOffer error:', err); }
             }
         };
-
-        const handleWebRTCOffer = async ({ offer }) => {
+        const handleWebRTCOffer    = async ({ offer }) => {
             if (!mounted) return;
             const pc = pcRef.current || createPeerConnection(localStream.current || new MediaStream());
             try {
@@ -207,40 +163,23 @@ const VideoCallPage = () => {
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 socket.emit('webrtcAnswer', { roomId: sessionId, answer });
-                console.log('📤 Sent answer');
-            } catch (err) {
-                console.error('createAnswer error:', err);
-            }
+            } catch (err) { console.error('createAnswer error:', err); }
         };
-
-        const handleWebRTCAnswer = async ({ answer }) => {
+        const handleWebRTCAnswer   = async ({ answer }) => {
             if (!mounted || !pcRef.current) return;
-            try {
-                await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
-                console.log('✅ Remote description set');
-            } catch (err) {
-                console.error('setRemoteDescription error:', err);
-            }
+            try { await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer)); }
+            catch (err) { console.error('setRemoteDescription error:', err); }
         };
-
-        const handleICECandidate = async ({ candidate }) => {
+        const handleICECandidate   = async ({ candidate }) => {
             if (!mounted || !pcRef.current) return;
-            try {
-                await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-            } catch (_) {}
+            try { await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
         };
-
-        const handleCallEnded = () => {
+        const handleCallEnded      = () => {
             if (!mounted) return;
-            setCallStatus('ended');
-            setStatusMsg('Partner ended the call.');
-            doCleanup(false);
+            setCallStatus('ended'); setStatusMsg('Partner ended the call.'); doCleanup(false);
         };
-
-        const handleCallError = ({ message: msg }) => {
-            if (!mounted) return;
-            setVerifyError(msg);
-            setCallStatus('error');
+        const handleCallError      = ({ message: msg }) => {
+            if (!mounted) return; setVerifyError(msg); setCallStatus('error');
         };
 
         socket.on('waitingForPeer',     handleWaitingForPeer);
@@ -261,10 +200,7 @@ const VideoCallPage = () => {
         };
 
         init().catch(err => {
-            if (mounted) {
-                setVerifyError(err.message || 'Failed to start call.');
-                setCallStatus('error');
-            }
+            if (mounted) { setVerifyError(err.message || 'Failed to start call.'); setCallStatus('error'); }
         });
 
         return () => {
@@ -279,13 +215,9 @@ const VideoCallPage = () => {
         };
     }, [sessionInfo, socket]);
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 5. Cleanup
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── 5. Cleanup ────────────────────────────────────────────────────────────
     const doCleanup = useCallback((emitEnd = true) => {
-        if (emitEnd && socket && sessionId) {
-            socket.emit('endCall', { roomId: sessionId });
-        }
+        if (emitEnd && socket && sessionId) socket.emit('endCall', { roomId: sessionId });
         if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }
         stopStream(localStream.current);
         stopStream(screenStream.current);
@@ -295,9 +227,7 @@ const VideoCallPage = () => {
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     }, [socket, sessionId]);
 
-    useEffect(() => {
-        return () => { doCleanup(callStatus !== 'ended'); };
-    }, []);
+    useEffect(() => { return () => { doCleanup(callStatus !== 'ended'); }; }, []);
 
     const handleEndCall = () => {
         doCleanup(true);
@@ -305,9 +235,7 @@ const VideoCallPage = () => {
         setStatusMsg('You ended the call.');
     };
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 6. Media controls
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ── 6. Media controls ─────────────────────────────────────────────────────
     const toggleMute = () => {
         if (!localStream.current) return;
         localStream.current.getAudioTracks().forEach(t => { t.enabled = !t.enabled; });
@@ -315,236 +243,145 @@ const VideoCallPage = () => {
     };
 
     const toggleCamera = () => {
-        // BUG FIX #5: Disable camera toggle while screen sharing to avoid
-        // confusing state — camera track is not in use during screen share.
-        if (isSharing) return;
-        if (!localStream.current) return;
+        if (isSharing || !localStream.current) return;
         localStream.current.getVideoTracks().forEach(t => { t.enabled = !t.enabled; });
         setIsCamOff(p => !p);
     };
 
-    // ── stopScreenShare ────────────────────────────────────────────────────────
-    // BUG FIX #1: Defined as a useCallback so the ref always points to the
-    // latest closure. screenTrack.onended calls stopScreenShareRef.current()
-    // instead of a captured-at-start stale copy.
-    //
-    // BUG FIX #4: Gracefully handles the no-camera case — when localStream has
-    // no video track we simply remove the screen video sender from the PC
-    // rather than trying to replaceTrack with undefined, which threw an error.
-    //
-    // BUG FIX #3: After stopping screen share we renegotiate (createOffer) so
-    // the partner's browser gets updated track info and switches back to camera
-    // (or blank) properly.
     const stopScreenShare = useCallback(async () => {
         if (!screenStream.current) return;
-
         stopStream(screenStream.current);
         screenStream.current = null;
         setIsSharing(false);
         setShareError('');
 
-        const pc = pcRef.current;
-        if (!pc) return;
-
-        const camTrack = localStream.current?.getVideoTracks()[0];
-        const videoSender = pc.getSenders().find(s => s.track?.kind === 'video');
+        const pc          = pcRef.current;
+        const camTrack    = localStream.current?.getVideoTracks()[0];
+        const videoSender = pc?.getSenders().find(s => s.track?.kind === 'video');
 
         if (camTrack && videoSender) {
-            // Camera available — swap screen track back to camera track
-            try {
-                await videoSender.replaceTrack(camTrack);
-            } catch (err) {
-                console.error('replaceTrack (screen→cam) error:', err);
-            }
+            try { await videoSender.replaceTrack(camTrack); } catch (err) { console.error(err); }
         } else if (videoSender && !camTrack) {
-            // No camera — remove the video sender entirely so partner sees nothing
             pc.removeTrack(videoSender);
         }
 
-        // Restore local preview to camera (or blank if no camera)
-        if (localVideoRef.current) {
-            localVideoRef.current.srcObject = localStream.current || null;
-        }
+        if (localVideoRef.current) localVideoRef.current.srcObject = localStream.current || null;
 
-        // BUG FIX #3: Renegotiate so partner receives updated track state
-        if (pc.signalingState === 'stable' && socket) {
-            try {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                socket.emit('webrtcOffer', { roomId: sessionId, offer });
-                console.log('🔄 Renegotiated after screen share stop');
-            } catch (err) {
-                console.warn('Renegotiation after stop-share failed (non-fatal):', err.message);
-            }
-        }
-    }, [socket, sessionId]);
-
-    // Keep the ref in sync with the latest closure
-    useEffect(() => {
-        stopScreenShareRef.current = stopScreenShare;
-    }, [stopScreenShare]);
-
-    // ── startScreenShare ───────────────────────────────────────────────────────
-    // BUG FIX #1: onended calls stopScreenShareRef.current() — always latest fn.
-    // BUG FIX #2: sets isSharing=true BEFORE touching the video element so the
-    //             render condition (`isSharing || (hasCamera && !isCamOff)`) keeps
-    //             localVideoRef in the DOM during screen share.
-    // BUG FIX #3: Renegotiates after replacing the track so the partner's browser
-    //             actually switches to the screen stream.
-    const startScreenShare = async () => {
-        setShareError('');
-        let screen;
-        try {
-            screen = await navigator.mediaDevices.getDisplayMedia({
-                video: { cursor: 'always' },
-                audio: false, // screen audio causes echo; mic audio already in call
-            });
-        } catch (err) {
-            if (err.name === 'NotAllowedError') {
-                setShareError('Screen share permission denied.');
-            } else {
-                setShareError('Could not start screen share.');
-            }
-            console.error('getDisplayMedia error:', err);
-            return;
-        }
-
-        screenStream.current = screen;
-        const screenTrack = screen.getVideoTracks()[0];
-
-        // BUG FIX #1: use ref so this always calls the latest stopScreenShare
-        screenTrack.onended = () => stopScreenShareRef.current?.();
-
-        const pc = pcRef.current;
-        if (pc) {
-            const videoSender = pc.getSenders().find(s => s.track?.kind === 'video');
-            try {
-                if (videoSender) {
-                    // Replace existing video sender track with screen track
-                    await videoSender.replaceTrack(screenTrack);
-                } else {
-                    // No existing video sender (audio-only call) — add a new one
-                    pc.addTrack(screenTrack, screen);
-                }
-            } catch (err) {
-                console.error('replaceTrack (cam→screen) error:', err);
-                stopStream(screen);
-                screenStream.current = null;
-                setShareError('Failed to switch to screen share.');
-                return;
-            }
-        }
-
-        // BUG FIX #2: Set isSharing BEFORE updating srcObject so the video
-        // element stays mounted (render condition includes isSharing).
-        setIsSharing(true);
-        setIsCamOff(false); // camera state no longer relevant while sharing
-
-        if (localVideoRef.current) {
-            localVideoRef.current.srcObject = screen;
-        }
-
-        // BUG FIX #3: Renegotiate so partner switches to the screen stream
         if (pc && pc.signalingState === 'stable' && socket) {
             try {
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
                 socket.emit('webrtcOffer', { roomId: sessionId, offer });
-                console.log('🖥️  Screen share started — renegotiating with partner');
-            } catch (err) {
-                console.warn('Renegotiation after start-share failed (non-fatal):', err.message);
-            }
+            } catch (err) { console.warn('Renegotiation after stop-share:', err.message); }
+        }
+    }, [socket, sessionId]);
+
+    useEffect(() => { stopScreenShareRef.current = stopScreenShare; }, [stopScreenShare]);
+
+    const startScreenShare = async () => {
+        setShareError('');
+        let screen;
+        try {
+            screen = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always' }, audio: false });
+        } catch (err) {
+            setShareError(err.name === 'NotAllowedError' ? 'Screen share permission denied.' : 'Could not start screen share.');
+            return;
+        }
+
+        screenStream.current = screen;
+        const screenTrack    = screen.getVideoTracks()[0];
+        screenTrack.onended  = () => stopScreenShareRef.current?.();
+
+        const pc          = pcRef.current;
+        const videoSender = pc?.getSenders().find(s => s.track?.kind === 'video');
+        try {
+            if (videoSender) await videoSender.replaceTrack(screenTrack);
+            else pc?.addTrack(screenTrack, screen);
+        } catch (err) {
+            stopStream(screen);
+            screenStream.current = null;
+            setShareError('Failed to switch to screen share.');
+            return;
+        }
+
+        setIsSharing(true);
+        setIsCamOff(false);
+        if (localVideoRef.current) localVideoRef.current.srcObject = screen;
+
+        if (pc && pc.signalingState === 'stable' && socket) {
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                socket.emit('webrtcOffer', { roomId: sessionId, offer });
+            } catch (err) { console.warn('Renegotiation after start-share:', err.message); }
         }
     };
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 7. Render
-    // ═══════════════════════════════════════════════════════════════════════════
-    if (isVerifying) {
-        return (
-            <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white">
-                <FaSpinner className="animate-spin text-4xl text-indigo-400 mr-4" />
-                <span className="text-lg">Verifying session…</span>
-            </div>
-        );
-    }
-
-    if (callStatus === 'error' || verifyError) {
-        return (
-            <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-                <div className="bg-gray-800 rounded-2xl p-8 text-center max-w-sm">
-                    <FaExclamationTriangle className="text-5xl text-red-400 mx-auto mb-4" />
-                    <h2 className="text-xl font-bold text-white mb-2">Cannot Join Call</h2>
-                    <p className="text-gray-400 mb-6">{verifyError}</p>
-                    <button
-                        onClick={() => navigate('/chat')}
-                        className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition"
-                    >
-                        Back to Chat
-                    </button>
-                </div>
-            </div>
-        );
-    }
-
-    if (callStatus === 'ended') {
-        return (
-            <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-                <div className="bg-gray-800 rounded-2xl p-8 text-center max-w-sm">
-                    <div className="text-5xl mb-4">📵</div>
-                    <h2 className="text-xl font-bold text-white mb-2">Call Ended</h2>
-                    <p className="text-gray-400 mb-6">{statusMsg || 'The call has ended.'}</p>
-                    <button
-                        onClick={() => navigate('/chat')}
-                        className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition"
-                    >
-                        Back to Chat
-                    </button>
-                </div>
-            </div>
-        );
-    }
-
-    // ── Main call UI ──────────────────────────────────────────────────────────
-    // BUG FIX #2: localVideoRef must stay mounted whenever:
-    //   • Camera is on (hasCamera && !isCamOff)
-    //   • Screen sharing is active (isSharing)
-    // Previously the condition was only (hasCamera && !isCamOff), which removed
-    // the video element from the DOM the moment screen share started with camera
-    // off — breaking localVideoRef and srcObject assignment.
+    // ── 7. Render ─────────────────────────────────────────────────────────────
     const showLocalVideo = isSharing || (hasCamera && !isCamOff);
 
+    if (isVerifying) return (
+        <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white gap-3 p-4">
+            <FaSpinner className="animate-spin text-3xl text-indigo-400" />
+            <span className="text-base sm:text-lg">Verifying session…</span>
+        </div>
+    );
+
+    if (callStatus === 'error' || verifyError) return (
+        <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
+            <div className="bg-gray-800 rounded-2xl p-6 sm:p-8 text-center max-w-sm w-full">
+                <FaExclamationTriangle className="text-4xl sm:text-5xl text-red-400 mx-auto mb-4" />
+                <h2 className="text-lg sm:text-xl font-bold text-white mb-2">Cannot Join Call</h2>
+                <p className="text-gray-400 mb-6 text-sm">{verifyError}</p>
+                <button onClick={() => navigate('/chat')} className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition text-sm w-full sm:w-auto">
+                    Back to Chat
+                </button>
+            </div>
+        </div>
+    );
+
+    if (callStatus === 'ended') return (
+        <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
+            <div className="bg-gray-800 rounded-2xl p-6 sm:p-8 text-center max-w-sm w-full">
+                <div className="text-4xl sm:text-5xl mb-4">📵</div>
+                <h2 className="text-lg sm:text-xl font-bold text-white mb-2">Call Ended</h2>
+                <p className="text-gray-400 mb-6 text-sm">{statusMsg || 'The call has ended.'}</p>
+                <button onClick={() => navigate('/chat')} className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition text-sm w-full sm:w-auto">
+                    Back to Chat
+                </button>
+            </div>
+        </div>
+    );
+
     return (
-        <div className="flex flex-col h-screen bg-gray-900 text-white select-none">
+        // Use dvh so mobile browser chrome (address bar) doesn't overflow the layout
+        <div className="flex flex-col bg-gray-900 text-white select-none" style={{ height: '100dvh' }}>
 
             {/* Header */}
-            <div className="flex items-center justify-between px-6 py-3 bg-gray-800 border-b border-gray-700 shrink-0">
-                <div>
-                    <h1 className="font-bold text-lg">
+            <div className="flex items-center justify-between px-3 sm:px-6 py-2 sm:py-3 bg-gray-800 border-b border-gray-700 shrink-0">
+                <div className="min-w-0 mr-2">
+                    <h1 className="font-bold text-sm sm:text-lg truncate">
                         Session with {sessionInfo?.partnerName || '…'}
                     </h1>
-                    <p className="text-xs text-gray-400">
+                    <p className="text-[10px] sm:text-xs text-gray-400 truncate">
                         {sessionInfo?.myRole} · {sessionInfo?.session?.scheduledAt
                             ? new Date(sessionInfo.session.scheduledAt).toLocaleString()
                             : ''}
                     </p>
                 </div>
-
-                <div className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-sm ${
+                <div className={`flex items-center gap-1.5 rounded-full px-2 sm:px-3 py-1 sm:py-1.5 text-[10px] sm:text-sm shrink-0 ${
                     callStatus === 'in_call' ? 'bg-green-900/50' : 'bg-gray-700'
                 }`}>
                     {callStatus === 'in_call' ? (
                         <>
-                            <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                            <span className="w-1.5 h-1.5 sm:w-2 sm:h-2 bg-green-400 rounded-full animate-pulse" />
                             <span className="text-green-300 font-medium">Live</span>
-                            {isSharing && (
-                                <span className="ml-1 text-blue-300 text-xs font-medium">· Sharing screen</span>
-                            )}
+                            {isSharing && <span className="text-blue-300 hidden sm:inline">· Sharing</span>}
                         </>
                     ) : (
                         <>
-                            <FaSpinner className="animate-spin text-indigo-400 w-3 h-3" />
-                            <span className="text-gray-300">{statusMsg}</span>
+                            <FaSpinner className="animate-spin text-indigo-400 w-2.5 h-2.5" />
+                            <span className="text-gray-300 max-w-[90px] sm:max-w-none truncate text-[10px] sm:text-sm">{statusMsg}</span>
                         </>
                     )}
                 </div>
@@ -552,129 +389,93 @@ const VideoCallPage = () => {
 
             {/* Banners */}
             {!hasCamera && !isSharing && (
-                <div className="bg-yellow-900/40 text-yellow-300 text-xs text-center py-1.5 px-4">
+                <div className="bg-yellow-900/40 text-yellow-300 text-[10px] sm:text-xs text-center py-1 px-3 shrink-0">
                     ⚠️ No camera detected — audio-only mode
                 </div>
             )}
             {isSharing && (
-                <div className="bg-blue-900/50 text-blue-200 text-xs text-center py-1.5 px-4 flex items-center justify-center gap-2">
-                    🖥️ You are sharing your screen —
-                    <button
-                        onClick={stopScreenShare}
-                        className="underline font-semibold hover:text-white transition"
-                    >
-                        Stop sharing
-                    </button>
+                <div className="bg-blue-900/50 text-blue-200 text-[10px] sm:text-xs text-center py-1 px-3 flex items-center justify-center gap-2 shrink-0">
+                    🖥️ You are sharing your screen —{' '}
+                    <button onClick={stopScreenShare} className="underline font-semibold hover:text-white">Stop</button>
                 </div>
             )}
             {shareError && (
-                <div className="bg-red-900/50 text-red-300 text-xs text-center py-1.5 px-4">
+                <div className="bg-red-900/50 text-red-300 text-[10px] sm:text-xs text-center py-1 px-3 shrink-0">
                     ⚠️ {shareError}
                 </div>
             )}
 
-            {/* Video grid */}
-            <div className="flex-1 grid grid-cols-2 gap-3 p-4 overflow-hidden min-h-0">
+            {/* Video grid
+                Mobile  (portrait): stacked — remote on top, local below (smaller)
+                Desktop (sm+)      : side by side, equal halves
+            */}
+            <div className="flex-1 flex flex-col sm:grid sm:grid-cols-2 gap-2 p-2 sm:p-4 overflow-hidden min-h-0">
 
-                {/* Remote */}
-                <div className="relative bg-gray-800 rounded-2xl overflow-hidden flex items-center justify-center">
+                {/* Remote — takes more space on mobile */}
+                <div className="relative bg-gray-800 rounded-xl sm:rounded-2xl overflow-hidden flex items-center justify-center flex-[2] sm:flex-none min-h-0">
                     <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
                     {callStatus !== 'in_call' && (
                         <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-800/95">
-                            <div className="w-16 h-16 rounded-full bg-indigo-700 flex items-center justify-center text-3xl mb-3">
+                            <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full bg-indigo-700 flex items-center justify-center text-2xl sm:text-3xl mb-2">
                                 👤
                             </div>
-                            <p className="text-gray-200 font-medium">{sessionInfo?.partnerName}</p>
-                            <p className="text-gray-500 text-xs mt-1 animate-pulse">{statusMsg}</p>
+                            <p className="text-gray-200 font-medium text-sm">{sessionInfo?.partnerName}</p>
+                            <p className="text-gray-500 text-[10px] sm:text-xs mt-1 animate-pulse">{statusMsg}</p>
                         </div>
                     )}
-                    <div className="absolute bottom-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-2 py-1 text-xs text-white">
+                    <div className="absolute bottom-2 left-2 bg-black/50 backdrop-blur-sm rounded-md px-1.5 py-0.5 text-[10px] sm:text-xs text-white">
                         {sessionInfo?.partnerName}
                     </div>
                 </div>
 
-                {/* Local — BUG FIX #2: video element stays in DOM during screen share */}
-                <div className="relative bg-gray-800 rounded-2xl overflow-hidden flex items-center justify-center">
+                {/* Local — smaller on mobile */}
+                <div className="relative bg-gray-800 rounded-xl sm:rounded-2xl overflow-hidden flex items-center justify-center flex-1 sm:flex-none min-h-0">
                     {showLocalVideo ? (
-                        <video
-                            ref={localVideoRef}
-                            autoPlay
-                            muted
-                            playsInline
-                            className="w-full h-full object-cover"
-                        />
+                        <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
                     ) : (
                         <>
-                            {/* Placeholder when no camera and not sharing */}
-                            <div className="flex flex-col items-center justify-center text-gray-500 gap-2">
-                                <FaVideoSlash className="text-4xl" />
-                                <span className="text-xs">{isCamOff ? 'Camera off' : 'No camera'}</span>
+                            <div className="flex flex-col items-center justify-center text-gray-500 gap-1 sm:gap-2">
+                                <FaVideoSlash className="text-2xl sm:text-4xl" />
+                                <span className="text-[10px] sm:text-xs">{isCamOff ? 'Camera off' : 'No camera'}</span>
                             </div>
-                            {/* Keep ref mounted but hidden so tracks still work */}
                             <video ref={localVideoRef} autoPlay muted playsInline className="hidden" />
                         </>
                     )}
-                    <div className="absolute bottom-3 left-3 bg-black/50 backdrop-blur-sm rounded-lg px-2 py-1 text-xs text-white">
-                        {isSharing ? '🖥️ Your screen' : `You (${sessionInfo?.myRole})`}
+                    <div className="absolute bottom-2 left-2 bg-black/50 backdrop-blur-sm rounded-md px-1.5 py-0.5 text-[10px] sm:text-xs text-white">
+                        {isSharing ? '🖥️ Screen' : `You (${sessionInfo?.myRole})`}
                     </div>
                 </div>
             </div>
 
-            {/* Controls */}
-            <div className="flex items-center justify-center gap-4 py-4 bg-gray-800 border-t border-gray-700 shrink-0">
+            {/* Controls — larger touch targets on mobile */}
+            <div className="flex items-center justify-center gap-3 sm:gap-4 py-3 sm:py-4 px-4 bg-gray-800 border-t border-gray-700 shrink-0">
 
-                {/* Mute */}
-                <button
-                    onClick={toggleMute}
-                    title={isMuted ? 'Unmute' : 'Mute'}
-                    className={`w-12 h-12 rounded-full flex items-center justify-center transition ${
-                        isMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-500'
-                    }`}
-                >
-                    {isMuted ? <FaMicrophoneSlash /> : <FaMicrophone />}
+                <button onClick={toggleMute} title={isMuted ? 'Unmute' : 'Mute'}
+                    className={`w-12 h-12 rounded-full flex items-center justify-center transition active:scale-90 ${isMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-500'}`}>
+                    {isMuted ? <FaMicrophoneSlash className="text-base sm:text-lg" /> : <FaMicrophone className="text-base sm:text-lg" />}
                 </button>
 
-                {/* Camera — BUG FIX #5: disabled while sharing screen */}
-                <button
-                    onClick={toggleCamera}
-                    disabled={!hasCamera || isSharing}
-                    title={
-                        isSharing         ? 'Camera unavailable while screen sharing'
-                        : !hasCamera      ? 'No camera available'
-                        : isCamOff        ? 'Turn camera on'
-                        :                   'Turn camera off'
-                    }
-                    className={`w-12 h-12 rounded-full flex items-center justify-center transition ${
-                        !hasCamera || isSharing
-                            ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                            : isCamOff
-                                ? 'bg-red-600 hover:bg-red-700'
-                                : 'bg-gray-600 hover:bg-gray-500'
-                    }`}
-                >
-                    {isCamOff ? <FaVideoSlash /> : <FaVideo />}
+                <button onClick={toggleCamera} disabled={!hasCamera || isSharing}
+                    title={isSharing ? 'Unavailable while sharing' : !hasCamera ? 'No camera' : isCamOff ? 'Turn on' : 'Turn off'}
+                    className={`w-12 h-12 rounded-full flex items-center justify-center transition active:scale-90 ${
+                        !hasCamera || isSharing ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                        : isCamOff             ? 'bg-red-600 hover:bg-red-700'
+                        :                        'bg-gray-600 hover:bg-gray-500'
+                    }`}>
+                    {isCamOff ? <FaVideoSlash className="text-base sm:text-lg" /> : <FaVideo className="text-base sm:text-lg" />}
                 </button>
 
-                {/* Screen share */}
-                <button
-                    onClick={isSharing ? stopScreenShare : startScreenShare}
-                    title={isSharing ? 'Stop sharing screen' : 'Share your screen'}
-                    className={`w-12 h-12 rounded-full flex items-center justify-center transition ${
-                        isSharing
-                            ? 'bg-blue-600 hover:bg-blue-700 ring-2 ring-blue-400'
-                            : 'bg-gray-600 hover:bg-gray-500'
-                    }`}
-                >
-                    {isSharing ? <FaStop className="text-sm" /> : <FaDesktop />}
+                <button onClick={isSharing ? stopScreenShare : startScreenShare}
+                    title={isSharing ? 'Stop sharing' : 'Share screen'}
+                    className={`w-12 h-12 rounded-full flex items-center justify-center transition active:scale-90 ${
+                        isSharing ? 'bg-blue-600 hover:bg-blue-700 ring-2 ring-blue-400' : 'bg-gray-600 hover:bg-gray-500'
+                    }`}>
+                    {isSharing ? <FaStop className="text-sm" /> : <FaDesktop className="text-base sm:text-lg" />}
                 </button>
 
-                {/* End call */}
-                <button
-                    onClick={handleEndCall}
-                    title="End call"
-                    className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center transition shadow-lg"
-                >
-                    <FaPhoneSlash className="text-xl" />
+                <button onClick={handleEndCall} title="End call"
+                    className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center transition shadow-lg active:scale-90">
+                    <FaPhoneSlash className="text-lg sm:text-xl" />
                 </button>
             </div>
         </div>
